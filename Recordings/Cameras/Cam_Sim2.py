@@ -3,7 +3,7 @@ import cv2
 class SimCamera2:
 
     def __init__(self):
-        self.cap = cv2.VideoCapture(2)
+        self.cap = cv2.VideoCapture(1)
         self.recording = False
 
     def start_recording(self, path):

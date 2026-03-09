@@ -1,49 +1,103 @@
+import cv2
 import os
 import threading
 from datetime import datetime
-
-from Recordings.Cameras.Cam_Sim1 import SimCamera1
-from Recordings.Cameras.Cam_Sim2 import SimCamera2
 
 
 class RecorderController:
 
     def __init__(self):
-        self.cam1 = SimCamera1()
-        self.cam2 = SimCamera2()
-        self.start_event = threading.Event()
-        self.stop_event = threading.Event()
 
-    def create_session_folder(self):
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        folder = f"Recordings/session_{ts}"
-        os.makedirs(folder, exist_ok=True)
-        return folder
+        # CHANGE CAMERA INDEXES HERE
+        self.CAM1_INDEX = 0
+        self.CAM2_INDEX = 1
+
+        self.recording = False
+        self.cam1 = None
+        self.cam2 = None
+        self.out1 = None
+        self.out2 = None
+        self.thread = None
+        self.folder = ""
 
     def start_recording(self):
-        self.stop_event.clear()
-        folder = self.create_session_folder()
-        cam1_path = f"{folder}/cam1.mp4"
-        cam2_path = f"{folder}/cam2.mp4"
-        t1 = threading.Thread(target=self.record_cam1, args=(cam1_path,))
-        t2 = threading.Thread(target=self.record_cam2, args=(cam2_path,))
-        t1.start()
-        t2.start()
-        self.start_event.set()
 
-    def record_cam1(self, path):
-        self.start_event.wait()
-        self.cam1.start_recording(path)
-        while not self.stop_event.is_set():
-            self.cam1.capture()
-        self.cam1.stop_recording()
+        if self.recording:
+            print("Recording already running")
+            return
 
-    def record_cam2(self, path):
-        self.start_event.wait()
-        self.cam2.start_recording(path)
-        while not self.stop_event.is_set():
-            self.cam2.capture()
-        self.cam2.stop_recording()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.folder = os.path.join("recordings", f"session_{timestamp}")
+        os.makedirs(self.folder, exist_ok=True)
+
+        self.cam1 = cv2.VideoCapture(self.CAM1_INDEX)
+        self.cam2 = cv2.VideoCapture(self.CAM2_INDEX)
+
+        if not self.cam1.isOpened() or not self.cam2.isOpened():
+            print("Error: Could not open cameras")
+            return
+
+        ret1, frame1 = self.cam1.read()
+        ret2, frame2 = self.cam2.read()
+
+        if not ret1 or not ret2:
+            print("Error reading frames")
+            return
+
+        h1, w1 = frame1.shape[:2]
+        h2, w2 = frame2.shape[:2]
+
+        fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+
+        self.out1 = cv2.VideoWriter(
+            os.path.join(self.folder, f"cam1_idx{self.CAM1_INDEX}.avi"),
+            fourcc,
+            30,
+            (w1, h1)
+        )
+
+        self.out2 = cv2.VideoWriter(
+            os.path.join(self.folder, f"cam2_idx{self.CAM2_INDEX}.avi"),
+            fourcc,
+            30,
+            (w2, h2)
+        )
+
+        self.recording = True
+        self.thread = threading.Thread(target=self.record_loop)
+        self.thread.start()
+
+        print("Recording started")
+
+    def record_loop(self):
+
+        while self.recording:
+
+            ret1, frame1 = self.cam1.read()
+            ret2, frame2 = self.cam2.read()
+
+            if ret1:
+                self.out1.write(frame1)
+
+            if ret2:
+                self.out2.write(frame2)
 
     def stop_recording(self):
-        self.stop_event.set()
+
+        if not self.recording:
+            print("Recording not running")
+            return
+
+        self.recording = False
+
+        if self.thread:
+            self.thread.join()
+
+        self.cam1.release()
+        self.cam2.release()
+        self.out1.release()
+        self.out2.release()
+
+        cv2.destroyAllWindows()
+
+        print("Recording saved in:", self.folder)

@@ -1,9 +1,22 @@
 import cv2
 
-cap = cv2.VideoCapture(0)
+print("Scanning cameras...\n")
 
-ret, frame = cap.read()
+working = []
 
-print(frame.shape)
+for i in range(10):
 
-cap.release()
+    cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+
+    if cap.isOpened():
+        ret, frame = cap.read()
+
+        if ret:
+            print(f"Camera {i} is working")
+            working.append(i)
+        else:
+            print(f"Camera {i} opened but no frame")
+
+    cap.release()
+
+print("\nWorking camera indexes:", working)
