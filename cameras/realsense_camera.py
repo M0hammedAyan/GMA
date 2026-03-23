@@ -11,7 +11,7 @@ class RealSenseCamera:
         config = rs.config()
 
         # 🔥 Lower resolution for stability
-        config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 15)
+        config.enable_stream(rs.stream.color, 1280,720,rs.format.bgr8, 15)
 
         self.pipeline.start(config)
 
@@ -22,7 +22,7 @@ class RealSenseCamera:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
         # 🔥 Match realistic FPS
-        self.writer = cv2.VideoWriter(path, fourcc, 10, (640, 480))
+        self.writer = cv2.VideoWriter(path, fourcc, 10, ( 1280,720))
 
         self.recording = True
 

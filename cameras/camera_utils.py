@@ -17,7 +17,7 @@ def find_working_cameras(max_index=10):
             h, w = frame.shape[:2]
 
             # Ignore tiny / invalid streams (RealSense junk nodes)
-            if w >= 320 and h >= 240:
+            if w >= 1280 and h >= 720:
                 working.append(i)
 
         cap.release()

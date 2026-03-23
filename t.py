@@ -1,27 +1,14 @@
 import cv2
 
-print("Scanning camera indexes...\n")
+cap = cv2.VideoCapture(0)
 
-for i in range(8):
+for w, h in [(640,480),(1280,720),(1920,1080)]:
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
 
-    cap = cv2.VideoCapture(i)
+    real_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    real_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
-    if not cap.isOpened():
-        print(f"Index {i}: cannot open")
-        continue
+    print(f"Requested {w}x{h} -> Got {real_w}x{real_h}")
 
-    ret, frame = cap.read()
-
-    if ret:
-        h, w = frame.shape[:2]
-        print(f"Index {i}: WORKING ({w}x{h})")
-
-        cv2.imshow(f"Camera {i}", frame)
-        cv2.waitKey(1500)
-
-    else:
-        print(f"Index {i}: opened but no frames")
-
-    cap.release()
-
-cv2.destroyAllWindows()
+cap.release()
