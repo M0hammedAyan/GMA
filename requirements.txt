@@ -2,3 +2,4 @@ opencv-python
 PySide6
 pyrealsense2
 numpy
+open3d

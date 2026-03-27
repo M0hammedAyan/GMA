@@ -79,6 +79,24 @@ export GMA_RECORDINGS_DIR=/path/to/your/domain/folder
 python main.py
 ```
 
+To reduce dropped frames on Raspberry Pi and keep recorded video duration close to real time,
+you can tune capture/export load:
+
+```
+export GMA_CAPTURE_FPS=10
+export GMA_SAVE_RGB_DEPTH_EVERY=5
+export GMA_SAVE_POINTCLOUD_EVERY=20
+python main.py
+```
+
+Meaning:
+* `GMA_CAPTURE_FPS`: target video FPS used by both writers and capture loop
+* `GMA_SAVE_RGB_DEPTH_EVERY`: save RGB/Depth arrays every N frames
+* `GMA_SAVE_POINTCLOUD_EVERY`: save pointcloud NPZ every N frames (heaviest step)
+
+Note: the UI timer starts only after camera pipelines are fully initialized, so displayed
+recording time now matches actual captured duration.
+
 You can also run the lightweight synchronized CLI recorder:
 
 ```
@@ -123,6 +141,11 @@ Viewer controls:
 * `space` = pause/resume
 * `n` = next frame (when paused)
 
+Playback note:
+* For sessions recorded by `main.py`, the viewer uses `realsense.avi/.mp4` as the timeline,
+  so playback duration matches the real recorded duration even when depth/pointcloud files
+  are saved every N frames.
+
 ---
 
 ## Output
@@ -132,8 +155,8 @@ Videos are saved in a session folder:
 ```
 recordings/
    session_YYYYMMDD_HHMMSS/
-        realsense.mp4
-        webcam.mp4
+    realsense.avi
+    webcam.avi
         realsense/
             rgb/*.png
             depth/*.npy

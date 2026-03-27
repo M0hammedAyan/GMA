@@ -1,4 +1,5 @@
 import argparse
+import bisect
 import glob
 from pathlib import Path
 
@@ -21,12 +22,22 @@ def sorted_files(pattern: str) -> list[str]:
     return sorted(glob.glob(pattern))
 
 
+def stem_index(path: str, fallback: int) -> int:
+    try:
+        return int(Path(path).stem)
+    except ValueError:
+        return fallback
+
+
 def resolve_layout(session_dir: Path) -> dict:
     # Layout A (Recorder class output)
     rs_rgb_a = session_dir / "realsense" / "rgb"
     depth_a = session_dir / "realsense" / "depth"
     pc_a = session_dir / "realsense" / "pointcloud"
+    rs_mp4_a = session_dir / "realsense.mp4"
+    rs_avi_a = session_dir / "realsense.avi"
     webcam_mp4_a = session_dir / "webcam.mp4"
+    webcam_avi_a = session_dir / "webcam.avi"
 
     # Layout B (sync_multicam_capture.py output)
     rs_rgb_b = session_dir / "rgb_realsense"
@@ -35,12 +46,25 @@ def resolve_layout(session_dir: Path) -> dict:
     pc_b = session_dir / "pointcloud"
 
     if rs_rgb_a.exists() and depth_a.exists():
+        realsense_video = ""
+        if rs_avi_a.exists():
+            realsense_video = str(rs_avi_a)
+        elif rs_mp4_a.exists():
+            realsense_video = str(rs_mp4_a)
+
+        webcam_video = ""
+        if webcam_avi_a.exists():
+            webcam_video = str(webcam_avi_a)
+        elif webcam_mp4_a.exists():
+            webcam_video = str(webcam_mp4_a)
+
         return {
             "rs_rgb_files": sorted_files(str(rs_rgb_a / "*.png")),
             "depth_files": sorted_files(str(depth_a / "*.npy")),
             "pointcloud_files": sorted_files(str(pc_a / "*.npz")) if pc_a.exists() else [],
-            "webcam_mode": "video" if webcam_mp4_a.exists() else "none",
-            "webcam_video": str(webcam_mp4_a),
+            "realsense_video": realsense_video,
+            "webcam_mode": "video" if webcam_video else "none",
+            "webcam_video": webcam_video,
             "webcam_files": [],
         }
 
@@ -49,6 +73,7 @@ def resolve_layout(session_dir: Path) -> dict:
             "rs_rgb_files": sorted_files(str(rs_rgb_b / "*.png")),
             "depth_files": sorted_files(str(depth_b / "*.npy")),
             "pointcloud_files": sorted_files(str(pc_b / "*.npz")) if pc_b.exists() else [],
+            "realsense_video": "",
             "webcam_mode": "images" if webcam_rgb_b.exists() else "none",
             "webcam_video": "",
             "webcam_files": sorted_files(str(webcam_rgb_b / "*.png")) if webcam_rgb_b.exists() else [],
@@ -154,7 +179,15 @@ def main() -> None:
 
     webcam_mode = layout["webcam_mode"]
     webcam_files = layout["webcam_files"]
+    rs_video_path = layout["realsense_video"]
+    rs_video_cap = None
     webcam_cap = None
+
+    if rs_video_path:
+        rs_video_cap = cv2.VideoCapture(rs_video_path)
+        if not rs_video_cap.isOpened():
+            print("Warning: RealSense video could not be opened, falling back to image sequence")
+            rs_video_cap = None
 
     if webcam_mode == "video":
         webcam_cap = cv2.VideoCapture(layout["webcam_video"])
@@ -167,23 +200,49 @@ def main() -> None:
 
     o3d_mod, vis, pcd = create_open3d_visualizer(args.pointcloud)
 
-    delay_ms = max(1, int(1000.0 / max(1e-6, args.fps)))
+    if rs_video_cap is not None:
+        rs_video_fps = rs_video_cap.get(cv2.CAP_PROP_FPS)
+        playback_fps = rs_video_fps if rs_video_fps > 0 else args.fps
+    else:
+        playback_fps = args.fps
+
+    delay_ms = max(1, int(1000.0 / max(1e-6, playback_fps)))
     paused = False
     index = 0
+
+    depth_indices = [stem_index(path, i) for i, path in enumerate(depth_files)]
+    pointcloud_indices = [stem_index(path, i) for i, path in enumerate(pointcloud_files)]
 
     print(f"Viewing session: {session_dir}")
     print("Controls: q=quit, space=pause/resume, n=next frame (when paused)")
 
     try:
-        while index < frame_count:
+        while True:
             if not paused:
-                rs_rgb = cv2.imread(rs_rgb_files[index], cv2.IMREAD_COLOR)
-                depth = np.load(depth_files[index])
+                if rs_video_cap is not None:
+                    ok_rs, rs_rgb = rs_video_cap.read()
+                    if not ok_rs:
+                        break
+                else:
+                    if index >= frame_count:
+                        break
+                    rs_rgb = cv2.imread(rs_rgb_files[index], cv2.IMREAD_COLOR)
 
                 if rs_rgb is None:
                     print(f"Warning: missing RealSense RGB frame at index {index}, skipping")
                     index += 1
                     continue
+
+                if rs_video_cap is not None:
+                    current_rs_frame = max(0, int(rs_video_cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1)
+                    depth_pos = bisect.bisect_right(depth_indices, current_rs_frame) - 1
+                    depth_pos = max(0, min(depth_pos, len(depth_files) - 1))
+                    depth = np.load(depth_files[depth_pos])
+                    pointcloud_pos = bisect.bisect_right(pointcloud_indices, current_rs_frame) - 1
+                    pointcloud_pos = max(0, min(pointcloud_pos, len(pointcloud_files) - 1))
+                else:
+                    depth = np.load(depth_files[index])
+                    pointcloud_pos = index
 
                 if webcam_mode == "video":
                     ok, webcam_rgb = webcam_cap.read()
@@ -224,7 +283,7 @@ def main() -> None:
                 cv2.imshow("Depth Colormap", depth_vis)
 
                 if vis is not None:
-                    pointcloud_path = pointcloud_files[index] if index < len(pointcloud_files) else ""
+                    pointcloud_path = pointcloud_files[pointcloud_pos] if pointcloud_files else ""
                     update_open3d(o3d_mod, vis, pcd, pointcloud_path)
 
                 index += 1
@@ -240,6 +299,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Interrupted by user")
     finally:
+        if rs_video_cap is not None:
+            rs_video_cap.release()
         if webcam_cap is not None:
             webcam_cap.release()
         cv2.destroyAllWindows()

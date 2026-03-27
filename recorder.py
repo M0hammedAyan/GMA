@@ -10,13 +10,15 @@ from cameras.device_manager import find_webcam, check_realsense
 
 class Recorder:
 
-    def __init__(self):
+    def __init__(self, output_root=None):
         self.running = False
         self.thread = None
         self.realsense = None
         self.webcam = None
         self.session = None
         self.last_error = None
+        self.output_root = output_root or os.getenv("GMA_RECORDINGS_DIR", "recordings")
+        self.capture_fps = max(1, int(os.getenv("GMA_CAPTURE_FPS", "10")))
 
     def start(self):
         if self.running:
@@ -32,21 +34,23 @@ class Recorder:
             raise Exception("No webcam detected")
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.session = os.path.join("recordings", f"session_{timestamp}")
-        os.makedirs(self.session, exist_ok=True)
+        session_path = os.path.join(self.output_root, f"session_{timestamp}")
 
         try:
             # RealSense first to avoid OpenCV probing/locking RealSense V4L2 nodes.
             self.realsense = RealSenseCamera()
-            self.realsense.setup_folders(self.session)
-
             self.webcam = Webcam(webcam_device)
 
-            self.realsense.start(os.path.join(self.session, "realsense.mp4"))
-            self.webcam.start(os.path.join(self.session, "webcam.mp4"))
+            os.makedirs(session_path, exist_ok=True)
+            self.realsense.setup_folders(session_path)
+
+            self.realsense.start(os.path.join(session_path, "realsense.avi"), video_fps=self.capture_fps)
+            self.webcam.start(os.path.join(session_path, "webcam.avi"), video_fps=self.capture_fps)
         except Exception:
             self.stop()
             raise
+
+        self.session = session_path
 
         self.running = True
         self.thread = threading.Thread(target=self.loop, daemon=True)
@@ -55,7 +59,7 @@ class Recorder:
         print("Recording started")
 
     def loop(self):
-        fps = 10
+        fps = self.capture_fps
         interval = 1.0 / fps
         next_time = time.monotonic()
 
@@ -98,3 +102,4 @@ class Recorder:
 
         if self.session:
             print("Saved:", self.session)
+            self.session = None

@@ -1,4 +1,5 @@
 import cv2
+import os
 
 
 class Webcam:
@@ -15,18 +16,22 @@ class Webcam:
         self.writer = None
         self.recording = False
 
-    def start(self, path):
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    def start(self, path, video_fps=10):
+        # AVI+MJPG is more reliable on Raspberry Pi OpenCV builds than MP4 containers.
+        base, _ = os.path.splitext(path)
+        out_path = f"{base}.avi"
+        fourcc = cv2.VideoWriter_fourcc(*"MJPG")
 
         w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         if w <= 0 or h <= 0:
             w, h = 640, 480
 
-        self.writer = cv2.VideoWriter(path, fourcc, 10, (w, h))
+        self.writer = cv2.VideoWriter(out_path, fourcc, video_fps, (w, h))
         if not self.writer.isOpened():
-            raise RuntimeError(f"Failed to open webcam writer: {path}")
+            raise RuntimeError(f"Failed to open webcam writer: {out_path}")
         self.recording = True
+        self.path = out_path
 
     def capture(self):
         ret, frame = self.cap.read()

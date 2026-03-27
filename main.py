@@ -1,11 +1,14 @@
 from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QLabel, QMessageBox
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Signal
 import threading
 
 from recorder import Recorder
 
 
 class MainWindow(QWidget):
+    recording_started = Signal()
+    recording_start_failed = Signal(str)
+
     def __init__(self):
         super().__init__()
 
@@ -38,26 +41,34 @@ class MainWindow(QWidget):
 
         self.start_thread = None
 
+        self.recording_started.connect(self._handle_started)
+        self.recording_start_failed.connect(self._handle_start_error)
+
+    def _handle_started(self):
+        self.seconds = 0
+        self.timer.start(1000)
+        self.stop_btn.setEnabled(True)
+
+    def _handle_start_error(self, message):
+        self.timer.stop()
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        QMessageBox.critical(self, "Error", message)
+
     def start_recording(self):
         if self.start_thread and self.start_thread.is_alive():
             return
 
+        # Wait for successful backend start before showing recording time.
         self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.seconds = 0
-        self.timer.start(1000)
+        self.stop_btn.setEnabled(False)
 
         def _start_worker():
             try:
                 self.controller.start()
+                self.recording_started.emit()
             except Exception as e:
-                def _handle_error():
-                    self.timer.stop()
-                    self.start_btn.setEnabled(True)
-                    self.stop_btn.setEnabled(False)
-                    QMessageBox.critical(self, "Error", str(e))
-
-                QTimer.singleShot(0, _handle_error)
+                self.recording_start_failed.emit(str(e))
 
         self.start_thread = threading.Thread(target=_start_worker, daemon=True)
         self.start_thread.start()
@@ -69,6 +80,9 @@ class MainWindow(QWidget):
             self.timer.stop()
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
+
+            if self.controller.last_error is not None:
+                QMessageBox.warning(self, "Recording Warning", f"Capture stopped due to error:\n{self.controller.last_error}")
 
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
