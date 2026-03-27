@@ -42,7 +42,10 @@ This configuration is chosen because it is stable when recording from two camera
 GMA/
 │
 ├── main.py
-├── recorder_controller.py
+├── recorder.py
+├── sync_multicam_capture.py
+├── view_recordings.py
+├── cameras/
 ├── recordings/
 └── README.md
 ```
@@ -69,6 +72,57 @@ python main.py
 
 4. Click **Stop Recording** to stop recording and save the videos.
 
+Optional: set a custom output root directory before launch.
+
+```
+export GMA_RECORDINGS_DIR=/path/to/your/domain/folder
+python main.py
+```
+
+You can also run the lightweight synchronized CLI recorder:
+
+```
+python sync_multicam_capture.py
+```
+
+For Raspberry Pi stability, capture FPS is intentionally low by default (`10`) and can be set to `9` or `8`:
+
+```
+python sync_multicam_capture.py --fps 10
+python sync_multicam_capture.py --fps 9
+python sync_multicam_capture.py --fps 8
+```
+
+If your RealSense firmware does not support 10/9/8 at 640x480, the recorder automatically
+falls back to a compatible profile (for example 15 or 30) so recording still starts.
+
+---
+
+## Playback Viewer
+
+Use the viewer to play:
+* RealSense RGB
+* Webcam RGB
+* Depth colormap
+* Optional NPZ point cloud (Open3D)
+
+Examples:
+
+```
+python view_recordings.py
+python view_recordings.py --session recordings/session_YYYYMMDD_HHMMSS
+python view_recordings.py --session recordings/session_YYYYMMDD_HHMMSS --pointcloud
+python view_recordings.py --session recordings/session_YYYYMMDD_HHMMSS --fps 10
+```
+
+Note: when `--session` is not provided, the viewer now picks the latest playable session
+(it automatically skips empty/incomplete newest session folders).
+
+Viewer controls:
+* `q` = quit
+* `space` = pause/resume
+* `n` = next frame (when paused)
+
 ---
 
 ## Output
@@ -78,8 +132,12 @@ Videos are saved in a session folder:
 ```
 recordings/
    session_YYYYMMDD_HHMMSS/
-        cam1.avi
-        cam2.avi
+        realsense.mp4
+        webcam.mp4
+        realsense/
+            rgb/*.png
+            depth/*.npy
+            pointcloud/*.npz
 ```
 
 Each session contains synchronized recordings from both cameras.
