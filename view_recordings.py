@@ -1,10 +1,12 @@
 import argparse
 import bisect
 import glob
+import time
 from pathlib import Path
 
 import cv2
 import numpy as np
+import queue
 
 
 def list_sessions(recordings_root: str) -> list[Path]:
@@ -182,18 +184,28 @@ def main() -> None:
     rs_video_path = layout["realsense_video"]
     rs_video_cap = None
     webcam_cap = None
+    rs_video_fps = 0.0
+    webcam_video_fps = 0.0
 
     if rs_video_path:
         rs_video_cap = cv2.VideoCapture(rs_video_path)
         if not rs_video_cap.isOpened():
             print("Warning: RealSense video could not be opened, falling back to image sequence")
             rs_video_cap = None
+        else:
+            rs_video_fps = rs_video_cap.get(cv2.CAP_PROP_FPS)
+            if rs_video_fps <= 0:
+                rs_video_fps = float(args.fps)
 
     if webcam_mode == "video":
         webcam_cap = cv2.VideoCapture(layout["webcam_video"])
         if not webcam_cap.isOpened():
             print("Warning: webcam video could not be opened")
             webcam_mode = "none"
+        else:
+            webcam_video_fps = webcam_cap.get(cv2.CAP_PROP_FPS)
+            if webcam_video_fps <= 0:
+                webcam_video_fps = float(args.fps)
 
     if webcam_mode == "images" and not webcam_files:
         webcam_mode = "none"
@@ -201,14 +213,19 @@ def main() -> None:
     o3d_mod, vis, pcd = create_open3d_visualizer(args.pointcloud)
 
     if rs_video_cap is not None:
-        rs_video_fps = rs_video_cap.get(cv2.CAP_PROP_FPS)
         playback_fps = rs_video_fps if rs_video_fps > 0 else args.fps
     else:
         playback_fps = args.fps
 
-    delay_ms = max(1, int(1000.0 / max(1e-6, playback_fps)))
+    # shared clock
+    playback_anchor = time.perf_counter()
+    playback_offset = 0.0
     paused = False
-    index = 0
+
+    rs_last_rgb = None
+    rs_current_frame = -1
+    webcam_last_rgb = None
+    webcam_current_frame = -1
 
     depth_indices = [stem_index(path, i) for i, path in enumerate(depth_files)]
     pointcloud_indices = [stem_index(path, i) for i, path in enumerate(pointcloud_files)]
@@ -218,83 +235,106 @@ def main() -> None:
 
     try:
         while True:
-            if not paused:
-                if rs_video_cap is not None:
-                    ok_rs, rs_rgb = rs_video_cap.read()
-                    if not ok_rs:
-                        break
-                else:
-                    if index >= frame_count:
-                        break
-                    rs_rgb = cv2.imread(rs_rgb_files[index], cv2.IMREAD_COLOR)
+            playback_time = playback_offset if paused else playback_offset + (time.perf_counter() - playback_anchor)
 
+            if rs_video_cap is not None:
+                target_rs_frame = max(0, int(playback_time * playback_fps))
+                while rs_current_frame < target_rs_frame:
+                    ok_rs, frame = rs_video_cap.read()
+                    if not ok_rs:
+                        rs_last_rgb = None
+                        break
+                    rs_last_rgb = frame
+                    rs_current_frame += 1
+
+                if rs_last_rgb is None:
+                    break
+
+                rs_rgb = rs_last_rgb
+                current_rs_frame = rs_current_frame
+            else:
+                current_rs_frame = max(0, int(playback_time * playback_fps))
+                if current_rs_frame >= frame_count:
+                    break
+                rs_rgb = cv2.imread(rs_rgb_files[current_rs_frame], cv2.IMREAD_COLOR)
                 if rs_rgb is None:
-                    print(f"Warning: missing RealSense RGB frame at index {index}, skipping")
-                    index += 1
+                    playback_offset = current_rs_frame / max(1e-6, playback_fps)
+                    playback_anchor = time.perf_counter()
                     continue
 
-                if rs_video_cap is not None:
-                    current_rs_frame = max(0, int(rs_video_cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1)
-                    depth_pos = bisect.bisect_right(depth_indices, current_rs_frame) - 1
-                    depth_pos = max(0, min(depth_pos, len(depth_files) - 1))
-                    depth = np.load(depth_files[depth_pos])
-                    pointcloud_pos = bisect.bisect_right(pointcloud_indices, current_rs_frame) - 1
-                    pointcloud_pos = max(0, min(pointcloud_pos, len(pointcloud_files) - 1))
-                else:
-                    depth = np.load(depth_files[index])
-                    pointcloud_pos = index
+            depth_pos = bisect.bisect_right(depth_indices, current_rs_frame) - 1
+            depth_pos = max(0, min(depth_pos, len(depth_files) - 1))
+            depth = np.load(depth_files[depth_pos])
 
-                if webcam_mode == "video":
-                    ok, webcam_rgb = webcam_cap.read()
-                    if not ok:
-                        webcam_rgb = np.zeros_like(rs_rgb)
-                        cv2.putText(
-                            webcam_rgb,
-                            "Webcam stream ended",
-                            (20, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            1.0,
-                            (0, 0, 255),
-                            2,
-                        )
-                elif webcam_mode == "images":
-                    if index < len(webcam_files):
-                        webcam_rgb = cv2.imread(webcam_files[index], cv2.IMREAD_COLOR)
-                        if webcam_rgb is None:
-                            webcam_rgb = np.zeros_like(rs_rgb)
-                    else:
-                        webcam_rgb = np.zeros_like(rs_rgb)
-                else:
+            pointcloud_pos = bisect.bisect_right(pointcloud_indices, current_rs_frame) - 1
+            pointcloud_pos = max(0, min(pointcloud_pos, len(pointcloud_files) - 1))
+
+            if webcam_mode == "video" and webcam_cap is not None and webcam_video_fps > 0:
+                target_webcam_frame = max(0, int(playback_time * webcam_video_fps))
+                while webcam_current_frame < target_webcam_frame:
+                    ok_wc, frame = webcam_cap.read()
+                    if not ok_wc:
+                        break
+                    webcam_last_rgb = frame
+                    webcam_current_frame += 1
+
+                if webcam_last_rgb is None:
                     webcam_rgb = np.zeros_like(rs_rgb)
                     cv2.putText(
                         webcam_rgb,
-                        "No webcam source in session",
+                        "Webcam stream ended",
                         (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         1.0,
                         (0, 0, 255),
                         2,
                     )
+                else:
+                    webcam_rgb = webcam_last_rgb
+            elif webcam_mode == "images":
+                webcam_idx = min(current_rs_frame, len(webcam_files) - 1) if webcam_files else -1
+                if webcam_idx >= 0:
+                    webcam_rgb = cv2.imread(webcam_files[webcam_idx], cv2.IMREAD_COLOR)
+                    if webcam_rgb is None:
+                        webcam_rgb = np.zeros_like(rs_rgb)
+                else:
+                    webcam_rgb = np.zeros_like(rs_rgb)
+            else:
+                webcam_rgb = np.zeros_like(rs_rgb)
+                cv2.putText(
+                    webcam_rgb,
+                    "No webcam source in session",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (0, 0, 255),
+                    2,
+                )
 
-                depth_vis = depth_to_colormap(depth)
+            depth_vis = depth_to_colormap(depth)
 
-                cv2.imshow("RealSense RGB", rs_rgb)
-                cv2.imshow("Webcam RGB", webcam_rgb)
-                cv2.imshow("Depth Colormap", depth_vis)
+            cv2.imshow("RealSense RGB", rs_rgb)
+            cv2.imshow("Webcam RGB", webcam_rgb)
+            cv2.imshow("Depth Colormap", depth_vis)
 
-                if vis is not None:
-                    pointcloud_path = pointcloud_files[pointcloud_pos] if pointcloud_files else ""
-                    update_open3d(o3d_mod, vis, pcd, pointcloud_path)
+            if vis is not None:
+                pointcloud_path = pointcloud_files[pointcloud_pos] if pointcloud_files else ""
+                update_open3d(o3d_mod, vis, pcd, pointcloud_path)
 
-                index += 1
+            key = cv2.waitKey(10 if not paused else 50) & 0xFF
+            if key == ord(" "):
+                if paused:
+                    paused = False
+                    playback_anchor = time.perf_counter()
+                else:
+                    paused = True
+                    playback_offset = playback_time
 
-            key = cv2.waitKey(delay_ms if not paused else 50) & 0xFF
+            if paused and key == ord("n"):
+                playback_offset += 1.0 / max(1e-6, playback_fps)
+
             if key == ord("q"):
                 break
-            if key == ord(" "):
-                paused = not paused
-            if paused and key == ord("n"):
-                index = min(index + 1, frame_count - 1)
 
     except KeyboardInterrupt:
         print("Interrupted by user")

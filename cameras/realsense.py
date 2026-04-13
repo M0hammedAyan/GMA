@@ -2,6 +2,9 @@ import pyrealsense2 as rs
 import numpy as np
 import cv2
 import os
+import queue
+import threading
+import time
 
 
 class RealSenseCamera:
@@ -20,6 +23,16 @@ class RealSenseCamera:
         self.recording = False
         self.frame_count = 0
         self.video_fps = 10
+        self.running = False
+        self.capture_thread = None
+        self.process_thread = None
+        self.frame_queue = queue.Queue(maxsize=max(1, int(os.getenv("GMA_RS_QUEUE_SIZE", "2"))))
+        self.queue_drops = 0
+        self.capture_frames = 0
+        self.processed_frames = 0
+        self.last_error = None
+        self._capture_t0 = 0.0
+        self._last_fps_log = 0.0
 
         # Heavy disk writes are decimated to keep real-time video recording stable on Raspberry Pi.
         self.save_rgb_depth_every = max(1, int(os.getenv("GMA_SAVE_RGB_DEPTH_EVERY", "5")))
@@ -72,51 +85,133 @@ class RealSenseCamera:
         base, _ = os.path.splitext(video_path)
         out_path = f"{base}.avi"
         fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-        self.video_fps = video_fps
+
+        # Use actual negotiated stream FPS.
+        self.video_fps = max(1, int(getattr(self, "sensor_fps", video_fps)))
         self.writer = cv2.VideoWriter(out_path, fourcc, self.video_fps, (self.width, self.height))
         if not self.writer.isOpened():
             raise RuntimeError(f"Failed to open RealSense video writer: {out_path}")
         self.recording = True
         self.path = out_path
 
-    def capture(self):
-        frames = self.pipeline.wait_for_frames(timeout_ms=1000)
-        aligned = self.align.process(frames)
+        self.running = True
+        self.frame_count = 0
+        self.capture_frames = 0
+        self.processed_frames = 0
+        self.queue_drops = 0
+        self.last_error = None
+        self._capture_t0 = time.monotonic()
+        self._last_fps_log = self._capture_t0
 
-        depth_frame = aligned.get_depth_frame()
-        color_frame = aligned.get_color_frame()
+        self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self.process_thread = threading.Thread(target=self._process_loop, daemon=True)
+        self.capture_thread.start()
+        self.process_thread.start()
 
-        if not depth_frame or not color_frame:
+    def _capture_loop(self):
+        while self.running:
+            try:
+                frames = self.pipeline.wait_for_frames(timeout_ms=1000)
+                aligned = self.align.process(frames)
+
+                depth_frame = aligned.get_depth_frame()
+                color_frame = aligned.get_color_frame()
+
+                if not depth_frame or not color_frame:
+                    continue
+
+                # Keep frame handles alive after this scope so worker can process them.
+                depth_frame.keep()
+                color_frame.keep()
+
+                timestamp_ms = float(color_frame.get_timestamp())
+                frame_number = int(color_frame.get_frame_number())
+
+                try:
+                    while not self.frame_queue.empty():
+                        try:
+                            self.frame_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                    self.frame_queue.put_nowait((color_frame, depth_frame, timestamp_ms, frame_number))
+                except queue.Full:
+                    self.queue_drops += 1
+
+                self.capture_frames += 1
+                self._log_capture_fps()
+            except Exception as err:
+                self.last_error = err
+                self.running = False
+                break
+
+    def _log_capture_fps(self):
+        now = time.monotonic()
+        if now - self._last_fps_log < 2.0:
             return
 
-        color = np.asanyarray(color_frame.get_data())
-        depth = np.asanyarray(depth_frame.get_data())
+        elapsed = max(1e-6, now - self._capture_t0)
+        fps = self.capture_frames / elapsed
+        print(
+            f"RealSense capture fps={fps:.2f} expected={self.sensor_fps} "
+            f"queue={self.frame_queue.qsize()}/{self.frame_queue.maxsize} dropped={self.queue_drops}"
+        )
+        self._last_fps_log = now
 
-        # Save 2D reference video
-        if self.recording:
-            self.writer.write(color)
+    def _process_loop(self):
+        while self.running or not self.frame_queue.empty():
+            try:
+                color_frame, depth_frame, timestamp_ms, frame_number = self.frame_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
 
-        if self.frame_count % self.save_rgb_depth_every == 0:
-            # Save RGB + Depth (3D data sources)
-            cv2.imwrite(os.path.join(self.rgb_dir, f"{self.frame_count}.png"), color)
-            np.save(os.path.join(self.depth_dir, f"{self.frame_count}.npy"), depth)
+            try:
+                color = np.asanyarray(color_frame.get_data())
+                depth = np.asanyarray(depth_frame.get_data())
 
-        if self.frame_count % self.save_pointcloud_every == 0:
-            # Point cloud export is the most expensive operation, so save it less frequently.
-            points = self.pc.calculate(depth_frame)
-            self.pc.map_to(color_frame)
+                # Save 2D reference video in worker thread.
+                if self.recording and self.writer is not None:
+                    self.writer.write(color)
 
-            vertices = np.asanyarray(points.get_vertices()).view(np.float32).reshape(-1, 3)
-            colors = color.reshape(-1, 3) / 255.0
-            np.savez_compressed(
-                os.path.join(self.ply_dir, f"{self.frame_count}.npz"),
-                xyz=vertices,
-                rgb=colors,
-            )
+                # Depth is saved every frame so playback never reuses stale maps.
+                np.save(os.path.join(self.depth_dir, f"{frame_number}.npy"), depth)
 
-        self.frame_count += 1
+                if self.frame_count % self.save_rgb_depth_every == 0:
+                    cv2.imwrite(os.path.join(self.rgb_dir, f"{frame_number}.png"), color)
+
+                if self.frame_count % self.save_pointcloud_every == 0:
+                    points = self.pc.calculate(depth_frame)
+                    self.pc.map_to(color_frame)
+
+                    vertices = np.asanyarray(points.get_vertices()).view(np.float32).reshape(-1, 3)
+                    colors = color.reshape(-1, 3) / 255.0
+                    np.savez_compressed(
+                        os.path.join(self.ply_dir, f"{frame_number}.npz"),
+                        xyz=vertices,
+                        rgb=colors,
+                        timestamp_ms=timestamp_ms,
+                        frame_number=frame_number,
+                    )
+
+                self.frame_count += 1
+                self.processed_frames += 1
+            except Exception as err:
+                self.last_error = err
+                self.running = False
+                break
+
+    def capture(self):
+        # Capture is fully handled by internal capture/worker threads.
+        return
 
     def stop(self):
+        self.running = False
+        if self.capture_thread is not None and self.capture_thread.is_alive():
+            self.capture_thread.join()
+        if self.process_thread is not None and self.process_thread.is_alive():
+            self.process_thread.join()
+        self.capture_thread = None
+        self.process_thread = None
+
         if self.writer is not None:
             self.writer.release()
             self.writer = None

@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QLabel, QMessageBox
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import QElapsedTimer, QTimer, Signal
 import threading
 
 from recorder import Recorder
@@ -28,7 +28,7 @@ class MainWindow(QWidget):
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_timer)
-        self.seconds = 0
+        self.elapsed_timer = QElapsedTimer()
 
         layout.addWidget(self.timer_label)
         layout.addWidget(self.start_btn)
@@ -45,7 +45,8 @@ class MainWindow(QWidget):
         self.recording_start_failed.connect(self._handle_start_error)
 
     def _handle_started(self):
-        self.seconds = 0
+        self.elapsed_timer.start()
+        self.update_timer()
         self.timer.start(1000)
         self.stop_btn.setEnabled(True)
 
@@ -75,9 +76,10 @@ class MainWindow(QWidget):
 
     def stop_recording(self):
         try:
+            self.timer.stop()
+            self.update_timer()
             self.controller.stop()
 
-            self.timer.stop()
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
 
@@ -88,9 +90,10 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "Error", str(e))
 
     def update_timer(self):
-        self.seconds += 1
-        mins = self.seconds // 60
-        secs = self.seconds % 60
+        elapsed_ms = self.elapsed_timer.elapsed() if self.elapsed_timer.isValid() else 0
+        total_seconds = elapsed_ms // 1000
+        mins = total_seconds // 60
+        secs = total_seconds % 60
         self.timer_label.setText(f"{mins:02}:{secs:02}")
 
 

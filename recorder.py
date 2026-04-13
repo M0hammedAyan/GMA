@@ -12,13 +12,18 @@ class Recorder:
 
     def __init__(self, output_root=None):
         self.running = False
-        self.thread = None
+        self.webcam_thread = None
         self.realsense = None
         self.webcam = None
         self.session = None
         self.last_error = None
         self.output_root = output_root or os.getenv("GMA_RECORDINGS_DIR", "recordings")
         self.capture_fps = max(1, int(os.getenv("GMA_CAPTURE_FPS", "10")))
+        self.profile_capture = os.getenv("GMA_PROFILE_CAPTURE", "0") == "1"
+        self._profile_lock = threading.Lock()
+        self._profile_started_at = None
+        self._webcam_frames = 0
+        self._last_profile_log = 0.0
 
     def start(self):
         if self.running:
@@ -41,6 +46,10 @@ class Recorder:
             self.realsense = RealSenseCamera()
             self.webcam = Webcam(webcam_device)
 
+            # Keep capture pacing and both video writers on one shared effective FPS.
+            sensor_fps = int(getattr(self.realsense, "sensor_fps", self.capture_fps))
+            self.capture_fps = max(1, min(self.capture_fps, sensor_fps))
+
             os.makedirs(session_path, exist_ok=True)
             self.realsense.setup_folders(session_path)
 
@@ -53,40 +62,61 @@ class Recorder:
         self.session = session_path
 
         self.running = True
-        self.thread = threading.Thread(target=self.loop, daemon=True)
-        self.thread.start()
+        self._profile_started_at = time.monotonic()
+        self._last_profile_log = self._profile_started_at
+        self._webcam_frames = 0
+
+        self.webcam_thread = threading.Thread(target=self._webcam_loop, daemon=True)
+        self.webcam_thread.start()
 
         print("Recording started")
 
-    def loop(self):
-        fps = self.capture_fps
-        interval = 1.0 / fps
+    def _log_profile(self):
+        if not self.profile_capture:
+            return
+
+        with self._profile_lock:
+            now = time.monotonic()
+            if now - self._last_profile_log < 5.0:
+                return
+
+            elapsed = max(1e-6, now - self._profile_started_at)
+            webcam_fps = self._webcam_frames / elapsed
+            print(f"Capture stats: webcam={webcam_fps:.2f} fps")
+            self._last_profile_log = now
+
+    def _webcam_loop(self):
+        interval = 1.0 / float(self.capture_fps)
         next_time = time.monotonic()
 
         while self.running:
+            if self.realsense is not None and self.realsense.last_error is not None:
+                self.last_error = self.realsense.last_error
+                self.running = False
+                break
+
             now = time.monotonic()
-
-            if now >= next_time:
-                try:
-                    if self.realsense is not None:
-                        self.realsense.capture()
-                    if self.webcam is not None:
-                        self.webcam.capture()
-                except Exception as err:
-                    self.last_error = err
-                    self.running = False
-                    break
-
-                # Avoid runaway drift when one cycle takes too long.
-                next_time = max(next_time + interval, now)
-            else:
+            if now < next_time:
                 time.sleep(next_time - now)
+                continue
+
+            try:
+                if self.webcam is not None:
+                    self.webcam.capture()
+                    self._webcam_frames += 1
+                    self._log_profile()
+            except Exception as err:
+                self.last_error = err
+                self.running = False
+                break
+
+            next_time = max(next_time + interval, time.monotonic())
 
     def stop(self):
         self.running = False
-        if self.thread and self.thread.is_alive():
-            self.thread.join()
-        self.thread = None
+        if self.webcam_thread and self.webcam_thread.is_alive():
+            self.webcam_thread.join()
+        self.webcam_thread = None
 
         if self.webcam is not None:
             try:
@@ -97,6 +127,8 @@ class Recorder:
         if self.realsense is not None:
             try:
                 self.realsense.stop()
+                if self.last_error is None and self.realsense.last_error is not None:
+                    self.last_error = self.realsense.last_error
             finally:
                 self.realsense = None
 

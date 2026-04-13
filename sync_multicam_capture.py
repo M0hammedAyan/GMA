@@ -1,7 +1,10 @@
 import os
+import queue
+import threading
 import time
 import argparse
 from datetime import datetime
+from typing import Any
 
 import cv2
 import numpy as np
@@ -10,7 +13,7 @@ import pyrealsense2 as rs
 from cameras.device_manager import find_webcam
 
 
-def make_session_dirs(output_root: str) -> dict:
+def make_session_dirs(output_root: str) -> dict[str, str]:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     session_dir = os.path.join(output_root, f"session_{timestamp}")
 
@@ -28,7 +31,7 @@ def make_session_dirs(output_root: str) -> dict:
     return dirs
 
 
-def configure_realsense(width: int, height: int, fps: int) -> tuple[rs.pipeline, rs.align]:
+def configure_realsense(width: int, height: int, fps: int) -> tuple[Any, Any]:
     # Try requested FPS first, then low-FPS options, then common compatibility fallbacks.
     fps_attempts = [fps] + [x for x in (10, 9, 8, 15, 30) if x != fps]
 
@@ -64,7 +67,7 @@ def configure_webcam(device_path: str, width: int, height: int) -> cv2.VideoCapt
     return cap
 
 
-def save_iteration(dirs: dict, ts_ns: int, rs_rgb: np.ndarray, webcam_rgb: np.ndarray, depth: np.ndarray) -> None:
+def save_iteration(dirs: dict[str, str], ts_ns: int, rs_rgb: np.ndarray, webcam_rgb: np.ndarray, depth: np.ndarray) -> None:
     frame_id = str(ts_ns)
 
     cv2.imwrite(os.path.join(dirs["rs_rgb"], f"{frame_id}.png"), rs_rgb)
@@ -78,6 +81,49 @@ def save_iteration(dirs: dict, ts_ns: int, rs_rgb: np.ndarray, webcam_rgb: np.nd
         depth=depth,
         timestamp=ts_ns,
     )
+
+
+class AsyncSaver:
+
+    def __init__(self, dirs: dict[str, str]):
+        self.dirs = dirs
+        self.queue = queue.Queue(maxsize=4)
+        self.running = False
+        self.thread = None
+        self.dropped = 0
+        self.last_error = None
+
+    def start(self) -> None:
+        self.running = True
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def submit(self, ts_ns: int, rs_rgb: np.ndarray, webcam_rgb: np.ndarray, depth: np.ndarray) -> None:
+        try:
+            self.queue.put_nowait((ts_ns, rs_rgb, webcam_rgb, depth))
+        except queue.Full:
+            self.dropped += 1
+
+    def _run(self) -> None:
+        while self.running or not self.queue.empty():
+            try:
+                item = self.queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            try:
+                ts_ns, rs_rgb, webcam_rgb, depth = item
+                save_iteration(self.dirs, ts_ns, rs_rgb, webcam_rgb, depth)
+            except Exception as err:
+                self.last_error = err
+                self.running = False
+                break
+
+    def stop(self) -> None:
+        self.running = False
+        if self.thread and self.thread.is_alive():
+            self.thread.join()
+        self.thread = None
 
 
 def main() -> None:
@@ -96,6 +142,7 @@ def main() -> None:
     pipeline = None
     align = None
     webcam = None
+    saver = AsyncSaver(dirs)
 
     print(f"Saving session to: {dirs['session']}")
     print("Press 'q' to stop")
@@ -103,6 +150,7 @@ def main() -> None:
     try:
         pipeline, align = configure_realsense(width, height, fps)
         webcam = configure_webcam(webcam_device, width, height)
+        saver.start()
 
         while True:
             # Synchronization strategy:
@@ -141,7 +189,7 @@ def main() -> None:
             if webcam_rgb.shape[:2] != (height, width):
                 webcam_rgb = cv2.resize(webcam_rgb, (width, height), interpolation=cv2.INTER_LINEAR)
 
-            save_iteration(dirs, shared_ts_ns, rs_rgb, webcam_rgb, depth)
+            saver.submit(shared_ts_ns, rs_rgb, webcam_rgb, depth)
 
             depth_vis = cv2.applyColorMap(
                 cv2.convertScaleAbs(depth, alpha=0.03),
@@ -158,6 +206,7 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Interrupted by user")
     finally:
+        saver.stop()
         if webcam is not None:
             webcam.release()
         if pipeline is not None:
@@ -166,6 +215,10 @@ def main() -> None:
             except Exception:
                 pass
         cv2.destroyAllWindows()
+        if saver.dropped:
+            print(f"Dropped {saver.dropped} pending save tasks because disk I/O could not keep up")
+        if saver.last_error is not None:
+            print(f"Background save error: {saver.last_error}")
         print(f"Session saved: {dirs['session']}")
 
 
