@@ -15,7 +15,7 @@ QFrame#headerDivider {
 }
 
 QLabel#appTitle { font-size: 20px; font-weight: 700; }
-QLabel#sectionTitle { font-size: 17px; font-weight: 600; }
+QLabel#sectionTitle { font-size: 17px; font-weight: 600; background: transparent; }
 QLabel#uploadsQueueTitle {
 	font-size: 17px;
 	font-weight: 700;
@@ -226,27 +226,27 @@ QFrame#statsCard[variant="session_size"] QLabel#statsValue,
 QFrame#statsCard[variant="cameras"] QLabel#statsValue {
 	color: #FFFFFF;
 }
-QLabel#timer { font-size: 24px; font-weight: 700; color: #FAFAFA; }
+QLabel#timer { font-size: 24px; font-weight: 700; color: #FAFAFA; background: transparent; }
 QLabel#stateBadge { color: #A1A1AA; font-weight: 600; }
 QLabel#patientInfoLabel { color: #FAFAFA; font-size: 14px; font-weight: 500; }
 QFrame#recordShell {
-	background: #1E6A8D;
-	border: 1px solid #0F3E58;
+	background: #0B1220;
+	border: 1px solid #1F2937;
 	border-radius: 12px;
 }
 QFrame#recordLeftPanel, QFrame#recordRightPanel {
-	background: #1F6B8F;
-	border: 2px solid #0F3E58;
+	background: transparent;
+	border: 1px solid #1F2937;
 	border-radius: 20px;
 }
 QLabel#recordField {
-	background: #206B8E;
-	border: 2px solid #0B3E59;
+	background: transparent;
+	border: 1px solid #1F2937;
 	border-radius: 9px;
 	padding: 0 12px;
-	font-size: 22px;
+	font-size: 20px;
 	font-weight: 500;
-	color: #E6F4FF;
+	color: #E2E8F0;
 }
 QScrollArea#recordContentScroll {
 	background: transparent;
@@ -256,15 +256,15 @@ QScrollArea#recordContentScroll > QWidget > QWidget {
 	background: transparent;
 }
 QListWidget#patientHistoryList {
-	background: #1A5A79;
-	border: 1px solid #0B3E59;
+	background: transparent;
+	border: 1px solid #1F2937;
 	border-radius: 10px;
 	padding: 4px;
-	color: #E6F4FF;
+	color: #E2E8F0;
 }
 QListWidget#patientHistoryList::item {
 	padding: 6px 8px;
-	border-bottom: 1px solid #2B7AA0;
+	border-bottom: 1px solid #1F2937;
 }
 QListWidget#patientHistoryList::item:selected {
 	background: #2563EB;
@@ -276,30 +276,30 @@ QFrame#recordPreviewCard {
 	border-radius: 14px;
 }
 QLabel#previewChip {
-	background: #1F2937;
-	border: 1px solid #334155;
+	background: #111D30;
+	border: 1px solid #1F2937;
 	border-radius: 12px;
 	padding: 6px 10px;
 	font-size: 12px;
 	font-weight: 700;
-	color: #E5E7EB;
+	color: #E2E8F0;
 }
 QLabel#previewSurface {
-	background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #0F172A, stop: 1 #1E3A8A);
-	border: 1px solid #334155;
+	background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1, stop: 0 #0F172A, stop: 1 #1E293B);
+	border: 1px solid #1F2937;
 	border-radius: 12px;
-	color: #D1D5DB;
+	color: #E2E8F0;
 	font-size: 16px;
 	font-weight: 600;
 }
 QLabel#previewStatusChip {
-	background: #111827;
-	border: 1px solid #374151;
+	background: #111D30;
+	border: 1px solid #1F2937;
 	border-radius: 13px;
 	padding: 6px 12px;
 	font-size: 13px;
 	font-weight: 700;
-	color: #E5E7EB;
+	color: #E2E8F0;
 }
 QLabel#previewStatusChip[state="recording"] {
 	background: #7F1D1D;
@@ -406,10 +406,22 @@ QPushButton#recordingButton {
 	border-color: #DC2626;
 }
 QPushButton#backButton {
-	background: transparent;
-	border: 1px solid #27272A;
-	padding: 4px 8px;
-	max-width: 190px;
+	background: #2563EB;
+	border: 2px solid #1E40AF;
+	border-radius: 8px;
+	padding: 8px 16px;
+	min-width: 160px;
+	color: #FFFFFF;
+	font-weight: 600;
+	font-size: 14px;
+}
+QPushButton#backButton:hover {
+	background: #1D4ED8;
+	border: 2px solid #1E3A8A;
+}
+QPushButton#backButton:pressed {
+	background: #2563EB;
+	border: 2px solid #1E40AF;
 }
 QPushButton#secondaryButton {
 	background: #18181B;
@@ -891,7 +903,7 @@ QFrame#headerDivider {
 }
 
 QLabel#appTitle { font-size: 20px; font-weight: 700; color: #111827; }
-QLabel#sectionTitle { font-size: 17px; font-weight: 600; color: #111827; }
+QLabel#sectionTitle { font-size: 17px; font-weight: 600; color: #111827; background: transparent; }
 QLabel#uploadsQueueTitle {
 	font-size: 17px;
 	font-weight: 700;
@@ -1104,7 +1116,7 @@ QFrame#statsCard[variant="session_size"] QLabel#statsValue,
 QFrame#statsCard[variant="cameras"] QLabel#statsValue {
 	color: #0F172A;
 }
-QLabel#timer { font-size: 24px; font-weight: 700; color: #111827; }
+QLabel#timer { font-size: 24px; font-weight: 700; color: #111827; background: transparent; }
 QLabel#stateBadge { color: #6B7280; font-weight: 600; }
 QLabel#patientInfoLabel { color: #111827; font-size: 14px; font-weight: 500; }
 QFrame#recordShell {
@@ -1113,12 +1125,12 @@ QFrame#recordShell {
 	border-radius: 12px;
 }
 QFrame#recordLeftPanel, QFrame#recordRightPanel {
-	background: #E0F2FE;
+	background: transparent;
 	border: 2px solid #93C5FD;
 	border-radius: 20px;
 }
 QLabel#recordField {
-	background: #F8FCFF;
+	background: transparent;
 	border: 1px solid #BFDBFE;
 	border-radius: 9px;
 	padding: 0 12px;
@@ -1134,7 +1146,7 @@ QScrollArea#recordContentScroll > QWidget > QWidget {
 	background: transparent;
 }
 QListWidget#patientHistoryList {
-	background: #F8FCFF;
+	background: transparent;
 	border: 1px solid #BFDBFE;
 	border-radius: 10px;
 	padding: 4px;
@@ -1289,10 +1301,22 @@ QPushButton#recordingButton {
 	color: #FFFFFF;
 }
 QPushButton#backButton {
-	background: transparent;
-	border: 1px solid #D1D5DB;
-	padding: 4px 8px;
-	max-width: 190px;
+	background: #FFFFFF;
+	border: 2px solid #93C5FD;
+	border-radius: 8px;
+	padding: 8px 16px;
+	min-width: 160px;
+	color: #1E40AF;
+	font-weight: 600;
+	font-size: 14px;
+}
+QPushButton#backButton:hover {
+	background: #F0F9FF;
+	border: 2px solid #60A5FA;
+}
+QPushButton#backButton:pressed {
+	background: #FFFFFF;
+	border: 2px solid #93C5FD;
 }
 QPushButton#secondaryButton {
 	background: #FFFFFF;
