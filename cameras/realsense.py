@@ -26,7 +26,7 @@ class RealSenseCamera:
         self.running = False
         self.capture_thread = None
         self.process_thread = None
-        self.frame_queue = queue.Queue(maxsize=max(1, int(os.getenv("GMA_RS_QUEUE_SIZE", "2"))))
+        self.frame_queue = queue.Queue(maxsize=max(1, int(os.getenv("GMA_RS_QUEUE_SIZE", "8"))))
         self.queue_drops = 0
         self.capture_frames = 0
         self.processed_frames = 0
@@ -86,8 +86,8 @@ class RealSenseCamera:
         out_path = f"{base}.avi"
         fourcc = cv2.VideoWriter_fourcc(*"MJPG")
 
-        # Use actual negotiated stream FPS.
-        self.video_fps = max(1, int(getattr(self, "sensor_fps", video_fps)))
+        # Honor requested recording FPS; sensor may run higher and extra frames are skipped.
+        self.video_fps = max(1, int(video_fps))
         self.writer = cv2.VideoWriter(out_path, fourcc, self.video_fps, (self.width, self.height))
         if not self.writer.isOpened():
             raise RuntimeError(f"Failed to open RealSense video writer: {out_path}")
@@ -102,6 +102,11 @@ class RealSenseCamera:
         self.last_error = None
         self._capture_t0 = time.monotonic()
         self._last_fps_log = self._capture_t0
+        self._target_frame_interval_ms = 1000.0 / float(self.video_fps)
+        self._last_seen_timestamp_ms = None
+        self._frame_time_credit_ms = self._target_frame_interval_ms
+        self._video_next_emit_ts_ms = None
+        self._last_video_frame = None
 
         self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.process_thread = threading.Thread(target=self._process_loop, daemon=True)
@@ -127,12 +132,24 @@ class RealSenseCamera:
                 timestamp_ms = float(color_frame.get_timestamp())
                 frame_number = int(color_frame.get_frame_number())
 
+                if self._last_seen_timestamp_ms is None:
+                    self._last_seen_timestamp_ms = timestamp_ms
+                dt_ms = max(0.0, timestamp_ms - self._last_seen_timestamp_ms)
+                self._last_seen_timestamp_ms = timestamp_ms
+
+                self._frame_time_credit_ms += dt_ms
+                if self._frame_time_credit_ms + 0.5 < self._target_frame_interval_ms:
+                    continue
+                self._frame_time_credit_ms -= self._target_frame_interval_ms
+                if self._frame_time_credit_ms < 0.0:
+                    self._frame_time_credit_ms = 0.0
+
+                # Emit CFR video on a fixed time grid so output duration matches wall time.
+                if self.recording and self.writer is not None:
+                    color = np.asanyarray(color_frame.get_data())
+                    self._emit_video_frame(timestamp_ms, color)
+
                 try:
-                    while not self.frame_queue.empty():
-                        try:
-                            self.frame_queue.get_nowait()
-                        except queue.Empty:
-                            break
                     self.frame_queue.put_nowait((color_frame, depth_frame, timestamp_ms, frame_number))
                 except queue.Full:
                     self.queue_drops += 1
@@ -152,10 +169,27 @@ class RealSenseCamera:
         elapsed = max(1e-6, now - self._capture_t0)
         fps = self.capture_frames / elapsed
         print(
-            f"RealSense capture fps={fps:.2f} expected={self.sensor_fps} "
+            f"RealSense capture fps={fps:.2f} expected={self.video_fps} "
             f"queue={self.frame_queue.qsize()}/{self.frame_queue.maxsize} dropped={self.queue_drops}"
         )
         self._last_fps_log = now
+
+    def _emit_video_frame(self, timestamp_ms, color):
+        if self._video_next_emit_ts_ms is None:
+            self.writer.write(color)
+            self._video_next_emit_ts_ms = timestamp_ms + self._target_frame_interval_ms
+            self._last_video_frame = color
+            return
+
+        # Fill missing output slots with the latest known frame.
+        while timestamp_ms + 0.5 >= self._video_next_emit_ts_ms:
+            frame_to_write = color
+            if self._last_video_frame is not None and timestamp_ms - self._video_next_emit_ts_ms > (self._target_frame_interval_ms * 0.5):
+                frame_to_write = self._last_video_frame
+            self.writer.write(frame_to_write)
+            self._video_next_emit_ts_ms += self._target_frame_interval_ms
+
+        self._last_video_frame = color
 
     def _process_loop(self):
         while self.running or not self.frame_queue.empty():
@@ -167,10 +201,6 @@ class RealSenseCamera:
             try:
                 color = np.asanyarray(color_frame.get_data())
                 depth = np.asanyarray(depth_frame.get_data())
-
-                # Save 2D reference video in worker thread.
-                if self.recording and self.writer is not None:
-                    self.writer.write(color)
 
                 # Depth is saved every frame so playback never reuses stale maps.
                 np.save(os.path.join(self.depth_dir, f"{frame_number}.npy"), depth)
