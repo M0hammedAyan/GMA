@@ -1,4 +1,6 @@
 import sys
+import traceback
+import faulthandler
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
@@ -14,13 +16,19 @@ def _ensure_project_root_on_path() -> None:
 
 def run() -> int:
     _ensure_project_root_on_path()
+    faulthandler.enable(all_threads=True)
 
     from Frontend.ui_main_window import MainWindow
 
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    return app.exec()
+    try:
+        app = QApplication(sys.argv)
+        window = MainWindow()
+        window.show()
+        return app.exec()
+    except Exception as err:
+        print(f"Fatal application error: {err}", file=sys.stderr)
+        traceback.print_exc()
+        return 1
 
 
 if __name__ == "__main__":

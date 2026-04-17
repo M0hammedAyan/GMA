@@ -5,7 +5,10 @@ import subprocess
 from typing import List, Optional, Tuple
 
 import cv2
-import pyrealsense2 as rs
+try:
+    import pyrealsense2 as rs
+except ImportError:
+    rs = None
 
 
 def _video_nodes() -> List[Tuple[int, str]]:
@@ -147,5 +150,7 @@ def find_webcam() -> Optional[str]:
 
 
 def check_realsense():
+    if rs is None:
+        return False
     ctx = rs.context()
     return len(ctx.query_devices()) > 0

@@ -3,3 +3,4 @@ PySide6
 pyrealsense2
 numpy
 open3d
+psutil
