@@ -23,6 +23,24 @@ This project records the RealSense RGB stream in a PySide6 application and saves
 python main.py
 ```
 
+Run the minimal single-button Qt launcher:
+
+```bash
+python main.py --button-gui
+```
+
+Run with the full frontend UI:
+
+```bash
+python run_with_frontend.py
+```
+
+Run without frontend (headless recorder):
+
+```bash
+python run_without_frontend.py
+```
+
 Optional environment variable:
 
 ```bash
@@ -55,3 +73,5 @@ python view_recordings.py --session recordings/session_YYYYMMDD_HHMMSS
 * The camera pipeline uses only `rs.stream.color`.
 * Recording uses one writer and initializes it after the first frame.
 * The UI preview shows the live color frame only.
+* Running `python main.py` now starts the raw/headless recorder.
+* `--button-gui` opens a minimal single-button Qt window for start/stop control.
