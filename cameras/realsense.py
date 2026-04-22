@@ -62,11 +62,11 @@ class AdaptiveLoadController:
             self.last_eval = now
 
             overload = (
-                capture_q_size >= int(q_max * 0.75)
-                or record_q_size >= int(q_max * 0.75)
-                or avg_proc_ms > 35.0
+                capture_q_size >= int(q_max * 0.95)
+                or record_q_size >= int(q_max * 0.95)
+                or avg_proc_ms > 60.0
             )
-            stable = capture_q_size <= int(q_max * 0.25) and record_q_size <= int(q_max * 0.25) and avg_proc_ms < 15.0
+            stable = capture_q_size <= int(q_max * 0.1) and record_q_size <= int(q_max * 0.1) and avg_proc_ms < 20.0
 
             if overload:
                 self.overload_count += 1
@@ -78,12 +78,12 @@ class AdaptiveLoadController:
                 self.overload_count = 0
                 self.stable_count = 0
 
-            if self.overload_count >= 2 and self.level < 3:
+            if self.overload_count >= 3 and self.level < 3:
                 self.level += 1
                 self.overload_count = 0
                 print(f"AdaptiveLoad: overload detected -> level={self.level} target_record_fps={self._target_fps_for_level()}")
 
-            if self.stable_count >= 4 and self.level > 0:
+            if self.stable_count >= 6 and self.level > 0:
                 self.level -= 1
                 self.stable_count = 0
                 print(f"AdaptiveLoad: stable -> level={self.level} target_record_fps={self._target_fps_for_level()}")
@@ -107,7 +107,7 @@ class CaptureWorker(threading.Thread):
         self.last_log = 0.0
 
     def _enqueue_with_delay_policy(self, item):
-        now = time.monotonic()
+        # Keep only the most recent capture when processing lags.
         try:
             self.frame_queue.put_nowait(item)
             return
@@ -115,26 +115,18 @@ class CaptureWorker(threading.Thread):
             pass
 
         try:
-            oldest = self.frame_queue.get_nowait()
+            _ = self.frame_queue.get_nowait()
+            self.drop_old += 1
         except queue.Empty:
             self.drop_new += 1
             return
 
-        oldest_capture_ts = float(oldest[1])
-        oldest_age_ms = (now - oldest_capture_ts) * 1000.0
-
-        if oldest_age_ms > self.delay_threshold_ms:
-            self.drop_old += 1
+        while not self.stop_event.is_set():
             try:
-                self.frame_queue.put_nowait(item)
+                self.frame_queue.put(item, timeout=0.02)
+                return
             except queue.Full:
-                self.drop_new += 1
-        else:
-            self.drop_new += 1
-            try:
-                self.frame_queue.put_nowait(oldest)
-            except queue.Full:
-                pass
+                continue
 
     def _log_stats(self):
         now = time.monotonic()
@@ -182,20 +174,20 @@ class ProcessingWorker(threading.Thread):
         self,
         align,
         capture_queue,
-        record_queue,
         stop_event,
         adaptive,
         on_preview,
+        on_record_frame,
         on_error,
         delay_threshold_ms=200.0,
     ):
         super().__init__(daemon=True)
         self.align = align
         self.capture_queue = capture_queue
-        self.record_queue = record_queue
         self.stop_event = stop_event
         self.adaptive = adaptive
         self.on_preview = on_preview
+        self.on_record_frame = on_record_frame
         self.on_error = on_error
         self.delay_threshold_ms = float(delay_threshold_ms)
 
@@ -205,37 +197,6 @@ class ProcessingWorker(threading.Thread):
         self.proc_ms_sum = 0.0
         self.started_at = 0.0
         self.last_log = 0.0
-
-    def _enqueue_record_nonblocking(self, item):
-        now = time.monotonic()
-        capture_ts = float(item[0])
-        if (now - capture_ts) * 1000.0 > self.delay_threshold_ms:
-            self.dropped_record_stale += 1
-            return
-
-        try:
-            self.record_queue.put_nowait(item)
-            return
-        except queue.Full:
-            pass
-
-        try:
-            oldest = self.record_queue.get_nowait()
-        except queue.Empty:
-            return
-
-        oldest_capture_ts = float(oldest[0])
-        oldest_age_ms = (now - oldest_capture_ts) * 1000.0
-        if oldest_age_ms > self.delay_threshold_ms:
-            try:
-                self.record_queue.put_nowait(item)
-            except queue.Full:
-                pass
-        else:
-            try:
-                self.record_queue.put_nowait(oldest)
-            except queue.Full:
-                pass
 
     def _log_stats(self):
         now = time.monotonic()
@@ -248,11 +209,11 @@ class ProcessingWorker(threading.Thread):
         ram_mb = _process_ram_mb()
         ram_text = f"{ram_mb:.1f}MB" if ram_mb >= 0 else "n/a"
 
-        self.adaptive.evaluate(self.capture_queue.qsize(), self.record_queue.qsize(), self.capture_queue.maxsize, avg_ms)
+        self.adaptive.evaluate(self.capture_queue.qsize(), 0, self.capture_queue.maxsize, avg_ms)
 
         print(
             f"ProcessingWorker fps={fps:.2f} cap_q={self.capture_queue.qsize()}/{self.capture_queue.maxsize} "
-            f"rec_q={self.record_queue.qsize()}/{self.record_queue.maxsize} avg_proc_ms={avg_ms:.2f} "
+            f"avg_proc_ms={avg_ms:.2f} "
             f"stale_drop={self.dropped_record_stale} depth_enabled={self.adaptive.depth_enabled()} ram={ram_text}"
         )
         self.last_log = now
@@ -299,7 +260,7 @@ class ProcessingWorker(threading.Thread):
                 depth_map_copy = None if depth_colormap is None else depth_colormap.copy()
 
                 self.on_preview(color_copy, depth_map_copy)
-                self._enqueue_record_nonblocking((capture_ts, color_copy, depth_map_copy))
+                self.on_record_frame(capture_ts, color_copy, depth_map_copy)
 
                 self.processed_frames += 1
                 self.proc_ms_sum += (time.perf_counter() - item_started) * 1000.0
@@ -315,23 +276,19 @@ class ProcessingWorker(threading.Thread):
 
 
 class RecorderWorker(threading.Thread):
-    def __init__(self, record_queue, stop_event, color_output_path, depth_output_path, adaptive, on_error, delay_threshold_ms=200.0):
+    def __init__(self, stop_event, color_output_path, depth_output_path, target_fps, frame_source, on_error):
         super().__init__(daemon=True)
-        self.record_queue = record_queue
         self.stop_event = stop_event
         self.color_output_path = color_output_path
         self.depth_output_path = depth_output_path
-        self.adaptive = adaptive
+        self.target_fps = max(1, int(target_fps))
+        self.frame_source = frame_source
         self.on_error = on_error
-        self.delay_threshold_ms = float(delay_threshold_ms)
 
         self.color_writer = None
         self.depth_writer = None
         self.recorded_frames = 0
-        self.throttle_drops = 0
-        self.stale_drops = 0
         self.write_ms_sum = 0.0
-        self.last_write_ts = 0.0
         self.started_at = 0.0
         self.last_log = 0.0
         self._zero_depth_cache = None
@@ -375,40 +332,31 @@ class RecorderWorker(threading.Thread):
         ram_text = f"{ram_mb:.1f}MB" if ram_mb >= 0 else "n/a"
 
         print(
-            f"RecorderWorker fps={fps:.2f} q={self.record_queue.qsize()}/{self.record_queue.maxsize} "
-            f"stale_drop={self.stale_drops} throttle_drop={self.throttle_drops} "
-            f"avg_write_ms={avg_ms:.2f} target_fps={self.adaptive.target_record_fps()} ram={ram_text}"
+            f"RecorderWorker fps={fps:.2f} target={self.target_fps} avg_write_ms={avg_ms:.2f} ram={ram_text}"
         )
         self.last_log = now
 
     def run(self):
         self.started_at = time.monotonic()
         self.last_log = self.started_at
+        frame_interval = 1.0 / float(self.target_fps)
+        next_frame_time = time.time()
 
         try:
-            while not self.stop_event.is_set() or not self.record_queue.empty():
-                try:
-                    capture_ts, color, depth_colormap = self.record_queue.get(timeout=0.2)
-                except queue.Empty:
-                    self._log_stats()
+            while not self.stop_event.is_set():
+                now = time.time()
+                if now < next_frame_time:
+                    time.sleep(min(0.005, next_frame_time - now))
                     continue
 
-                now = time.monotonic()
-                age_ms = (now - float(capture_ts)) * 1000.0
-                if age_ms > self.delay_threshold_ms:
-                    self.stale_drops += 1
-                    self._log_stats()
-                    continue
-
-                target_fps = max(1, int(self.adaptive.target_record_fps()))
-                target_interval = 1.0 / float(target_fps)
-                if self.last_write_ts > 0.0 and (now - self.last_write_ts) < target_interval:
-                    self.throttle_drops += 1
+                _capture_ts, color, depth_colormap = self.frame_source()
+                if color is None:
+                    next_frame_time += frame_interval
                     self._log_stats()
                     continue
 
                 write_started = time.perf_counter()
-                self._init_writers(color, depth_colormap, target_fps)
+                self._init_writers(color, depth_colormap, self.target_fps)
 
                 depth_frame = depth_colormap
                 if depth_frame is None:
@@ -420,9 +368,10 @@ class RecorderWorker(threading.Thread):
                 self.depth_writer.write(depth_frame)
 
                 self.recorded_frames += 1
-                self.last_write_ts = now
                 self.write_ms_sum += (time.perf_counter() - write_started) * 1000.0
                 self._log_stats()
+
+                next_frame_time += frame_interval
         except Exception as err:
             self.on_error(err)
             self.stop_event.set()
@@ -453,17 +402,29 @@ class RealSenseCamera:
         self.path = ""
         self.last_error = None
 
-        self.capture_queue = queue.Queue(maxsize=30)
-        self.record_queue = queue.Queue(maxsize=30)
+        self.capture_queue = queue.Queue(maxsize=4)
         self.stop_event = threading.Event()
 
         self.capture_worker = None
         self.processing_worker = None
         self.recorder_worker = None
+        self._capture_thread = None
+        self._record_thread = None
 
         self._preview_lock = threading.Lock()
         self._latest_color = None
         self._latest_depth_colormap = None
+        self._record_lock = threading.Lock()
+        self._record_latest_color = None
+        self._record_latest_depth = None
+        self._record_latest_ts = 0.0
+        self._record_last_color = None
+        self._record_last_depth = None
+        self._record_blank_color = None
+        self._record_blank_depth = None
+        self._record_started_at = 0.0
+        self._record_stop_at = None
+        self._record_gate = threading.Event()
 
         self.base = ""
 
@@ -472,6 +433,7 @@ class RealSenseCamera:
 
     def _start_pipeline_with_fallbacks(self):
         attempts = [
+            ((1920, 1080, 30), (1280, 720, 30), "color 1920x1080@30 + depth 1280x720@30"),
             ((1280, 720, 30), (640, 480, 30), "color 1280x720@30 + depth 640x480@30"),
             ((1280, 720, 15), (640, 480, 15), "color 1280x720@15 + depth 640x480@15"),
             ((640, 480, 30), (640, 480, 30), "color 640x480@30 + depth 640x480@30"),
@@ -538,68 +500,196 @@ class RealSenseCamera:
                 self.last_error = err
                 return False
 
+    def _on_runtime_error(self, _err):
+        return self._restart_pipeline()
+
     def setup_folders(self, session_path):
         self.base = os.path.join(session_path, "realsense")
         os.makedirs(self.base, exist_ok=True)
 
-    def start(self, video_path, video_fps=30):
+    def start(self, video_path, video_fps=30, started_at=None):
         base, _ = os.path.splitext(video_path)
         color_out_path = f"{base}.avi"
         depth_out_path = f"{base}_depth.avi"
 
-        self.video_fps = max(1, int(min(video_fps, getattr(self, "sensor_fps", video_fps))))
-        self.adaptive = AdaptiveLoadController(self.video_fps)
+        self.video_fps = max(1, int(video_fps))
 
-        while not self.capture_queue.empty():
-            try:
-                self.capture_queue.get_nowait()
-            except queue.Empty:
-                break
-
-        while not self.record_queue.empty():
-            try:
-                self.record_queue.get_nowait()
-            except queue.Empty:
-                break
+        with self._record_lock:
+            self._record_latest_color = None
+            self._record_latest_depth = None
+            self._record_latest_ts = 0.0
+            self._record_last_color = None
+            self._record_last_depth = None
+            self._record_blank_color = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+            self._record_blank_depth = np.zeros((self.height, self.width, 3), dtype=np.uint8)
 
         self.stop_event.clear()
+        self._record_gate.clear()
         self.last_error = None
         self.recording = True
         self.running = True
         self.path = color_out_path
+        self._record_started_at = time.monotonic() if started_at is None else float(started_at)
+        if started_at is not None:
+            self._record_gate.set()
+        self._record_stop_at = None
 
-        self.capture_worker = CaptureWorker(
-            pipeline=self.pipeline,
-            frame_queue=self.capture_queue,
-            stop_event=self.stop_event,
-            on_error=self._on_worker_error,
-            on_runtime_error=lambda err: self._restart_pipeline(),
-            delay_threshold_ms=200.0,
-        )
-        self.processing_worker = ProcessingWorker(
-            align=self.align,
-            capture_queue=self.capture_queue,
-            record_queue=self.record_queue,
-            stop_event=self.stop_event,
-            adaptive=self.adaptive,
-            on_preview=self._update_latest_frames,
-            on_error=self._on_worker_error,
-            delay_threshold_ms=200.0,
-        )
-        self.recorder_worker = RecorderWorker(
-            record_queue=self.record_queue,
-            stop_event=self.stop_event,
-            color_output_path=color_out_path,
-            depth_output_path=depth_out_path,
-            adaptive=self.adaptive,
-            on_error=self._on_worker_error,
-            delay_threshold_ms=200.0,
+        self.capture_worker = threading.Thread(target=self._capture_loop, daemon=True)
+        self.recorder_worker = threading.Thread(
+            target=self._record_loop,
+            args=(color_out_path, depth_out_path),
+            daemon=True,
         )
 
         self.capture_worker.start()
-        self.processing_worker.start()
         self.recorder_worker.start()
         print(f"RealSense recording started: color={color_out_path} depth={depth_out_path}")
+
+    def _capture_loop(self):
+        while not self.stop_event.is_set():
+            try:
+                frames = self.pipeline.wait_for_frames(timeout_ms=1000)
+                capture_ts = time.time()
+            except RuntimeError as err:
+                print(f"RealSense error: {err}")
+                restarted = self._on_runtime_error(err)
+                if not restarted:
+                    self._on_worker_error(err)
+                    self.stop_event.set()
+                    break
+                continue
+            except Exception as err:
+                self._on_worker_error(err)
+                self.stop_event.set()
+                break
+
+            try:
+                aligned = self.align.process(frames)
+                depth_frame = aligned.get_depth_frame()
+                color_frame = aligned.get_color_frame()
+                if not depth_frame or not color_frame:
+                    continue
+
+                color = np.asanyarray(color_frame.get_data())
+                depth = np.asanyarray(depth_frame.get_data())
+                if color is None or depth is None or color.size == 0 or depth.size == 0:
+                    continue
+
+                if len(depth.shape) != 2:
+                    depth = depth.reshape(depth.shape[0], depth.shape[1])
+
+                depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth, alpha=0.03), cv2.COLORMAP_JET)
+            except Exception as err:
+                self._on_worker_error(err)
+                self.stop_event.set()
+                break
+
+            with self._record_lock:
+                self._record_latest_color = color.copy()
+                self._record_latest_depth = depth_colormap.copy()
+                self._record_latest_ts = capture_ts
+
+            with self._preview_lock:
+                self._latest_color = color.copy()
+                self._latest_depth_colormap = depth_colormap.copy()
+
+    def _prepare_latest_frames(self):
+        with self._record_lock:
+            if self._record_latest_color is None:
+                return None, None, None
+            capture_ts = self._record_latest_ts
+            color = self._record_latest_color.copy()
+            depth_colormap = None if self._record_latest_depth is None else self._record_latest_depth.copy()
+
+        if color is None:
+            return None, None, None
+        return capture_ts, color, depth_colormap
+
+    def _record_loop(self, color_out_path, depth_out_path):
+        target_fps = float(max(1, int(self.video_fps)))
+        written_count = 0
+
+        color_writer = None
+        depth_writer = None
+
+        try:
+            while True:
+                if not self._record_gate.is_set():
+                    time.sleep(0.002)
+                    continue
+
+                if self.stop_event.is_set():
+                    stop_at = self._record_stop_at if self._record_stop_at is not None else time.monotonic()
+                    elapsed = max(0.0, stop_at - self._record_started_at)
+                    target_frames = int(round(elapsed * target_fps))
+                    due_frames = target_frames - written_count
+                    if due_frames <= 0:
+                        break
+                else:
+                    elapsed = max(0.0, time.monotonic() - self._record_started_at)
+                    target_frames = int(elapsed * target_fps)
+                    due_frames = target_frames - written_count
+                    if due_frames <= 0:
+                        time.sleep(0.002)
+                        continue
+
+                _capture_ts, color, depth_colormap = self._prepare_latest_frames()
+                if color is None:
+                    with self._record_lock:
+                        if self._record_last_color is not None:
+                            color = self._record_last_color.copy()
+                            depth_colormap = None if self._record_last_depth is None else self._record_last_depth.copy()
+                        elif self._record_blank_color is not None:
+                            color = self._record_blank_color.copy()
+                            depth_colormap = None if self._record_blank_depth is None else self._record_blank_depth.copy()
+
+                if color is None:
+                    time.sleep(0.002)
+                    continue
+
+                if color_writer is None or depth_writer is None:
+                    h, w = color.shape[:2]
+                    dh, dw = depth_colormap.shape[:2] if depth_colormap is not None else (h, w)
+                    for codec in ("MJPG", "XVID"):
+                        fourcc = cv2.VideoWriter_fourcc(*codec)
+                        temp_color_writer = cv2.VideoWriter(color_out_path, fourcc, float(self.video_fps), (w, h))
+                        temp_depth_writer = cv2.VideoWriter(depth_out_path, fourcc, float(self.video_fps), (dw, dh))
+                        if temp_color_writer.isOpened() and temp_depth_writer.isOpened():
+                            color_writer = temp_color_writer
+                            depth_writer = temp_depth_writer
+                            print(
+                                f"RealSense writers opened codec={codec} fps={self.video_fps} "
+                                f"color={color_out_path} depth={depth_out_path}"
+                            )
+                            break
+                        temp_color_writer.release()
+                        temp_depth_writer.release()
+                        color_writer = None
+                        depth_writer = None
+
+                    if color_writer is None or depth_writer is None:
+                        raise RuntimeError("Failed to open RealSense writers")
+
+                depth_frame = depth_colormap
+                if depth_frame is None:
+                    depth_frame = self._record_blank_depth.copy() if self._record_blank_depth is not None else np.zeros_like(color)
+
+                with self._record_lock:
+                    self._record_last_color = color.copy()
+                    self._record_last_depth = depth_frame.copy()
+
+                for _ in range(max(1, due_frames)):
+                    color_writer.write(color)
+                    depth_writer.write(depth_frame)
+                    written_count += 1
+        except Exception as err:
+            self._on_worker_error(err)
+            self.stop_event.set()
+        finally:
+            if color_writer is not None:
+                color_writer.release()
+            if depth_writer is not None:
+                depth_writer.release()
 
     def _on_worker_error(self, err):
         self.last_error = err
@@ -623,9 +713,21 @@ class RealSenseCamera:
 
         return color, depth
 
+    def set_recording_start_time(self, started_at):
+        self._record_started_at = float(started_at)
+        self._record_gate.set()
+
+    def set_recording_stop_time(self, stop_at):
+        self._record_stop_at = float(stop_at)
+
+    def request_stop(self):
+        self.stop_event.set()
+
     def stop(self):
         self.running = False
         self.recording = False
+        if self._record_stop_at is None:
+            self._record_stop_at = time.monotonic()
         self.stop_event.set()
 
         pipeline_stopped = False
@@ -637,14 +739,11 @@ class RealSenseCamera:
                 pass
 
         if self.capture_worker is not None and self.capture_worker.is_alive():
-            self.capture_worker.join(timeout=3.0)
-        if self.processing_worker is not None and self.processing_worker.is_alive():
-            self.processing_worker.join(timeout=3.0)
+            self.capture_worker.join()
         if self.recorder_worker is not None and self.recorder_worker.is_alive():
-            self.recorder_worker.join(timeout=5.0)
+            self.recorder_worker.join()
 
         self.capture_worker = None
-        self.processing_worker = None
         self.recorder_worker = None
 
         if not pipeline_stopped:
@@ -656,3 +755,7 @@ class RealSenseCamera:
         with self._preview_lock:
             self._latest_color = None
             self._latest_depth_colormap = None
+        with self._record_lock:
+            self._record_latest_color = None
+            self._record_latest_depth = None
+            self._record_latest_ts = 0.0

@@ -36,7 +36,7 @@ class RealSenseRecorder:
         self.width = 0
         self.height = 0
 
-        self.queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=12)
+        self.queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=30)
         self.stop_event = threading.Event()
         self.capture_thread: Optional[threading.Thread] = None
         self.record_thread: Optional[threading.Thread] = None

@@ -58,6 +58,12 @@ def _start_pipeline(width: int, height: int, fps: int):
                 pipeline.stop()
             except Exception:
                 pass
+            # Try lower resolution if higher fails
+            if width > 1280:
+                width = 1280
+            elif width > 640:
+                width = 640
+            height = (height * width) // 1920 if width <= 1280 else (height * width) // 1280
 
     raise RuntimeError(f"Unable to start RealSense color stream: {last_error}")
 
@@ -68,7 +74,7 @@ def main() -> int:
     parser.add_argument("--output-root", default=os.getenv("GMA_RECORDINGS_DIR", "recordings"), help="Output root directory")
     args = parser.parse_args()
 
-    width, height = 1280, 720
+    width, height = 1920, 1080
     session_dir = _make_session_dir(args.output_root)
     output_path = session_dir / "realsense.avi"
 

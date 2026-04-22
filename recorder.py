@@ -19,6 +19,7 @@ class Recorder:
         self.webcam = None
         self.session = None
         self.last_error = None
+        self.started_at = None
         self.output_root = output_root or os.getenv("GMA_RECORDINGS_DIR", "recordings")
         self.capture_fps = max(1, int(os.getenv("GMA_CAPTURE_FPS", "30")))
         self.min_free_mb = max(1, int(os.getenv("GMA_MIN_FREE_MB", "512")))
@@ -55,17 +56,32 @@ class Recorder:
             self.webcam = Webcam(webcam_device)
 
             sensor_fps = int(getattr(self.realsense, "sensor_fps", self.capture_fps))
-            self.capture_fps = max(1, min(self.capture_fps, sensor_fps))
+            requested_fps = max(1, int(self.capture_fps))
+            self.capture_fps = max(1, min(requested_fps, sensor_fps))
+            print(
+                f"Capture FPS requested={requested_fps} effective={self.capture_fps} "
+                f"(realsense_sensor={sensor_fps})"
+            )
 
             os.makedirs(session_path, exist_ok=True)
             self.realsense.setup_folders(session_path)
-            self.realsense.start(os.path.join(session_path, "realsense.avi"), video_fps=self.capture_fps)
-            self.webcam.start(os.path.join(session_path, "webcam.avi"), video_fps=self.capture_fps)
+            self.realsense.start(
+                os.path.join(session_path, "realsense.avi"),
+                video_fps=self.capture_fps,
+            )
+            self.webcam.start(
+                os.path.join(session_path, "webcam.avi"),
+                video_fps=self.capture_fps,
+            )
+            common_start = time.monotonic()
+            self.realsense.set_recording_start_time(common_start)
+            self.webcam.set_recording_start_time(common_start)
         except Exception:
             self.stop()
             raise
 
         self.session = session_path
+        self.started_at = time.monotonic()
         self.running = True
 
         self.webcam_thread = threading.Thread(target=self._webcam_loop, daemon=True)
@@ -74,8 +90,6 @@ class Recorder:
         print("Recording started")
 
     def _webcam_loop(self):
-        interval = 1.0 / float(self.capture_fps)
-        next_time = time.monotonic()
         last_space_check = 0.0
 
         while self.running:
@@ -98,27 +112,18 @@ class Recorder:
                     self.running = False
                     break
                 last_space_check = now
-
-            if now < next_time:
-                time.sleep(next_time - now)
-                continue
-
-            try:
-                if self.webcam is not None:
-                    self.webcam.capture()
-            except Exception as err:
-                self.last_error = err
-                self.running = False
-                break
-
-            next_time = max(next_time + interval, time.monotonic())
+            time.sleep(0.02)
 
     def stop(self):
         self.running = False
 
-        if self.webcam_thread and self.webcam_thread.is_alive():
-            self.webcam_thread.join(timeout=2.0)
-        self.webcam_thread = None
+        common_stop = time.monotonic()
+        if self.webcam is not None:
+            self.webcam.set_recording_stop_time(common_stop)
+            self.webcam.request_stop()
+        if self.realsense is not None:
+            self.realsense.set_recording_stop_time(common_stop)
+            self.realsense.request_stop()
 
         if self.webcam is not None:
             try:
@@ -134,9 +139,19 @@ class Recorder:
             finally:
                 self.realsense = None
 
+        if self.webcam_thread and self.webcam_thread.is_alive():
+            self.webcam_thread.join(timeout=2.0)
+        self.webcam_thread = None
+
         if self.session:
             print("Saved:", self.session)
             self.session = None
+        self.started_at = None
+
+    def elapsed_seconds(self) -> int:
+        if self.started_at is None:
+            return 0
+        return max(0, int(time.monotonic() - self.started_at))
 
     def get_preview_frames(self):
         rs_color = None

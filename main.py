@@ -17,17 +17,27 @@ def _ensure_project_root_on_path() -> None:
 def _run_headless() -> int:
     from recorder import Recorder
 
+    def _format_hms(total_seconds: int) -> str:
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
     recorder = Recorder()
     try:
         recorder.start()
         print("Headless recording started. Press Ctrl+C to stop.")
         while True:
             time.sleep(1.0)
+            elapsed = recorder.elapsed_seconds()
+            print(f"\rRecording time: {_format_hms(elapsed)}", end="", flush=True)
             if recorder.last_error is not None:
                 raise RuntimeError(recorder.last_error)
     except KeyboardInterrupt:
+        print()
         return 0
     finally:
+        print()
         recorder.stop()
 
 
