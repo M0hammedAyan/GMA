@@ -29,6 +29,8 @@ def hhmmss(total_seconds):
 class MainWindow(QMainWindow):
     recording_started = Signal()
     recording_start_failed = Signal(str)
+    recording_stopped = Signal()
+    recording_stop_failed = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -45,6 +47,7 @@ class MainWindow(QMainWindow):
 
         self.controller = Recorder()
         self.start_thread = None
+        self.stop_thread = None
         self.is_recording = False
         self.seconds = 0
         self.uhid_seed = 1000
@@ -59,6 +62,8 @@ class MainWindow(QMainWindow):
 
         self.recording_started.connect(self._handle_started)
         self.recording_start_failed.connect(self._handle_start_error)
+        self.recording_stopped.connect(self._handle_stopped)
+        self.recording_stop_failed.connect(self._handle_stop_error)
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -388,12 +393,23 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Recording Error", error_text)
 
     def stop_recording(self):
-        try:
-            self.controller.stop()
-        except Exception as err:
-            QMessageBox.critical(self, "Stop Error", str(err))
+        if self.stop_thread and self.stop_thread.is_alive():
             return
 
+        self.record_page.action_btn.setEnabled(False)
+        self._log_status("Stopping recording and finalizing files...")
+
+        def _worker():
+            try:
+                self.controller.stop()
+                self.recording_stopped.emit()
+            except Exception as err:
+                self.recording_stop_failed.emit(str(err))
+
+        self.stop_thread = threading.Thread(target=_worker, daemon=True)
+        self.stop_thread.start()
+
+    def _handle_stopped(self):
         self.timer.stop()
         self.is_recording = False
         self._set_patient_locked(False)
@@ -418,11 +434,22 @@ class MainWindow(QMainWindow):
             f"Path: {self.last_saved_session}"
         )
 
+        self.record_page.action_btn.setEnabled(True)
         if self.controller.last_error is not None:
             QMessageBox.warning(self, "Capture Warning", str(self.controller.last_error))
 
         self._refresh_patient_upload_history()
         self._refresh_stats()
+
+    def _handle_stop_error(self, message):
+        self.timer.stop()
+        self.is_recording = False
+        self._set_patient_locked(False)
+        self._set_recording_visuals(False)
+        self._update_required_state()
+        self.record_page.action_btn.setEnabled(True)
+        self._log_status(f"Stop Error: {message}")
+        QMessageBox.critical(self, "Stop Error", message)
 
     def _latest_session_path(self):
         root = Path(self.controller.output_root)

@@ -1,13 +1,14 @@
 #include "dual_camera_recorder.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
-#include <limits>
+#include <mutex>
+#include <thread>
+#include <utility>
 
 #include <fcntl.h>
 #include <gst/app/gstappsrc.h>
@@ -21,10 +22,13 @@
 
 namespace {
 constexpr uint32_t kV4L2BufferCount = 6;
+constexpr auto kCapturePollTimeout = std::chrono::milliseconds(100);
+constexpr auto kWriterSleepQuantum = std::chrono::microseconds(2000);
+constexpr auto kBusDrainTimeout = 2 * GST_SECOND;
 
 bool xioctl(int fd, unsigned long request, void* arg) {
     while (true) {
-        int ret = ioctl(fd, request, arg);
+        const int ret = ioctl(fd, request, arg);
         if (ret == 0) {
             return true;
         }
@@ -35,25 +39,73 @@ bool xioctl(int fd, unsigned long request, void* arg) {
     }
 }
 
-std::string build_pipeline(const std::string& file_path, int width, int height, int fps, const std::string& raw_format) {
-    return "appsrc name=src is-live=true format=time do-timestamp=true "
+std::string build_pipeline(const std::string& file_path,
+                           int width,
+                           int height,
+                           int fps,
+                           const std::string& raw_format) {
+    return "appsrc name=src is-live=true format=time block=false do-timestamp=false "
            "caps=video/x-raw,format=" + raw_format + ",width=" +
            std::to_string(width) + ",height=" + std::to_string(height) +
            ",framerate=" + std::to_string(fps) +
-           "/1 ! queue max-size-buffers=32 leaky=downstream "
+           "/1 ! queue max-size-buffers=2 leaky=downstream "
            "! videoconvert ! video/x-raw,format=I420 "
            "! v4l2h264enc extra-controls=\"controls,video_bitrate=4000000;\" "
            "! h264parse ! mp4mux ! filesink location=" + file_path;
 }
 
+void reset_metric(std::atomic<uint64_t>& metric) {
+    metric.store(0, std::memory_order_relaxed);
+}
+
 }  // namespace
+
+DualCameraRecorder::LatestFrameBuffer::LatestFrameBuffer(size_t payload_bytes)
+    : payload_bytes_(payload_bytes), latest_{0, FramePacket(payload_bytes)} {}
+
+void DualCameraRecorder::LatestFrameBuffer::store(int64_t capture_timestamp_ns,
+                                                  int width,
+                                                  int height,
+                                                  int stride_bytes,
+                                                  const uint8_t* data,
+                                                  size_t size) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (latest_.packet.payload.size() != payload_bytes_) {
+        latest_.packet.payload.resize(payload_bytes_);
+    }
+
+    const size_t copy_size = std::min(payload_bytes_, size);
+    std::memcpy(latest_.packet.payload.data(), data, copy_size);
+    latest_.packet.frame_id = latest_.generation + 1;
+    latest_.packet.timestamp_ns = capture_timestamp_ns;
+    latest_.packet.width = width;
+    latest_.packet.height = height;
+    latest_.packet.stride_bytes = stride_bytes;
+    latest_.packet.valid = true;
+    ++latest_.generation;
+}
+
+bool DualCameraRecorder::LatestFrameBuffer::snapshot(FrameSnapshot& out) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!latest_.packet.valid) {
+        return false;
+    }
+    out = latest_;
+    return true;
+}
 
 DualCameraRecorder::DualCameraRecorder(Config cfg)
     : cfg_(std::move(cfg)),
       rs_frame_bytes_(static_cast<size_t>(cfg_.width * cfg_.height * 3)),
       wc_frame_bytes_(static_cast<size_t>(cfg_.width * cfg_.height * 2)),
-      rs_ring_(static_cast<size_t>(cfg_.buffer_seconds * cfg_.fps)),
-      wc_ring_(static_cast<size_t>(cfg_.buffer_seconds * cfg_.fps)) {}
+      rs_latest_(rs_frame_bytes_),
+      wc_latest_(wc_frame_bytes_) {
+    if (cfg_.fps < 1) {
+        cfg_.fps = 30;
+    }
+    writer_interval_ns_ = 1000000000LL / static_cast<int64_t>(cfg_.fps);
+        max_frame_age_ns_ = std::max<int64_t>(writer_interval_ns_ * 3, static_cast<int64_t>(cfg_.max_frame_age_ms) * 1000000LL);
+}
 
 DualCameraRecorder::~DualCameraRecorder() {
     stop();
@@ -64,26 +116,80 @@ bool DualCameraRecorder::start() {
         return true;
     }
 
+    reset_metric(metrics_.rs_captured);
+    reset_metric(metrics_.wc_captured);
+    reset_metric(metrics_.rs_written);
+    reset_metric(metrics_.wc_written);
+    reset_metric(metrics_.rs_skipped_empty);
+    reset_metric(metrics_.wc_skipped_empty);
+    reset_metric(metrics_.rs_skipped_stale);
+    reset_metric(metrics_.wc_skipped_stale);
+    reset_metric(metrics_.rs_push_failures);
+    reset_metric(metrics_.wc_push_failures);
+    reset_metric(metrics_.writer_ticks);
+    reset_metric(metrics_.paired_written);
+    reset_metric(metrics_.pair_skipped_empty);
+    reset_metric(metrics_.pair_skipped_stale);
+    reset_metric(metrics_.pair_skipped_age);
+    rs_last_written_generation_ = 0;
+    wc_last_written_generation_ = 0;
+    recording_start_ns_ = now_monotonic_ns();
+    recording_stop_ns_ = 0;
+
     std::filesystem::create_directories(cfg_.output_dir);
     gst_init(nullptr, nullptr);
 
-    if (!init_realsense()) {
+    auto cleanup_failed_start = [&]() {
+        close_writers();
+        close_webcam_v4l2();
+        if (rs_pipeline_ != nullptr) {
+            auto* pipeline = static_cast<rs2::pipeline*>(rs_pipeline_);
+            try {
+                pipeline->stop();
+            } catch (...) {
+            }
+            delete pipeline;
+            rs_pipeline_ = nullptr;
+        }
         running_.store(false);
+    };
+
+    if (!init_realsense()) {
+        cleanup_failed_start();
         return false;
     }
     if (!init_webcam_v4l2()) {
-        running_.store(false);
+        cleanup_failed_start();
         return false;
     }
     if (!init_writers()) {
-        running_.store(false);
+        cleanup_failed_start();
         return false;
     }
 
-    rs_thread_ = std::thread(&DualCameraRecorder::realsense_capture_loop, this);
-    wc_thread_ = std::thread(&DualCameraRecorder::webcam_capture_loop, this);
-    writer_thread_ = std::thread(&DualCameraRecorder::sync_writer_loop, this);
-    metrics_thread_ = std::thread(&DualCameraRecorder::metrics_loop, this);
+    try {
+        rs_thread_ = std::thread(&DualCameraRecorder::realsense_capture_loop, this);
+        wc_thread_ = std::thread(&DualCameraRecorder::webcam_capture_loop, this);
+        writer_thread_ = std::thread(&DualCameraRecorder::sync_writer_loop, this);
+        metrics_thread_ = std::thread(&DualCameraRecorder::metrics_loop, this);
+    } catch (...) {
+        running_.store(false);
+        if (rs_thread_.joinable()) {
+            rs_thread_.join();
+        }
+        if (wc_thread_.joinable()) {
+            wc_thread_.join();
+        }
+        if (writer_thread_.joinable()) {
+            writer_thread_.join();
+        }
+        if (metrics_thread_.joinable()) {
+            metrics_thread_.join();
+        }
+        cleanup_failed_start();
+        return false;
+    }
+
     return true;
 }
 
@@ -92,8 +198,7 @@ void DualCameraRecorder::stop() {
         return;
     }
 
-    rs_ring_.stop();
-    wc_ring_.stop();
+    recording_stop_ns_ = now_monotonic_ns();
 
     if (rs_thread_.joinable()) {
         rs_thread_.join();
@@ -108,6 +213,7 @@ void DualCameraRecorder::stop() {
         metrics_thread_.join();
     }
 
+    print_validation_summary();
     close_writers();
     close_webcam_v4l2();
 
@@ -214,7 +320,6 @@ bool DualCameraRecorder::init_writers() {
     const std::string wc_pipeline_desc = build_pipeline(wc_file, cfg_.width, cfg_.height, cfg_.fps, "YUY2");
 
     GError* err = nullptr;
-
     GstElement* rs_pipeline = gst_parse_launch(rs_pipeline_desc.c_str(), &err);
     if (err != nullptr || rs_pipeline == nullptr) {
         if (err != nullptr) {
@@ -249,6 +354,9 @@ bool DualCameraRecorder::init_writers() {
         return false;
     }
 
+    g_object_set(rs_src, "is-live", TRUE, "format", GST_FORMAT_TIME, "do-timestamp", FALSE, "block", FALSE, nullptr);
+    g_object_set(wc_src, "is-live", TRUE, "format", GST_FORMAT_TIME, "do-timestamp", FALSE, "block", FALSE, nullptr);
+
     gst_element_set_state(rs_pipeline, GST_STATE_PLAYING);
     gst_element_set_state(wc_pipeline, GST_STATE_PLAYING);
 
@@ -259,19 +367,83 @@ bool DualCameraRecorder::init_writers() {
     return true;
 }
 
+bool DualCameraRecorder::push_frame(void* appsrc, const FramePacket& packet, int64_t pts_ns, int64_t duration_ns) {
+    if (appsrc == nullptr || !packet.valid) {
+        return false;
+    }
+
+    GstBuffer* buf = gst_buffer_new_allocate(nullptr, packet.payload.size(), nullptr);
+    if (buf == nullptr) {
+        return false;
+    }
+
+    GstMapInfo map{};
+    if (!gst_buffer_map(buf, &map, GST_MAP_WRITE)) {
+        gst_buffer_unref(buf);
+        return false;
+    }
+
+    std::memcpy(map.data, packet.payload.data(), packet.payload.size());
+    gst_buffer_unmap(buf, &map);
+
+    GST_BUFFER_PTS(buf) = static_cast<GstClockTime>(std::max<int64_t>(0, pts_ns));
+    GST_BUFFER_DTS(buf) = static_cast<GstClockTime>(std::max<int64_t>(0, pts_ns));
+    GST_BUFFER_DURATION(buf) = static_cast<GstClockTime>(std::max<int64_t>(0, duration_ns));
+
+    const GstFlowReturn flow = gst_app_src_push_buffer(GST_APP_SRC(appsrc), buf);
+    if (flow != GST_FLOW_OK) {
+        std::cerr << "gst_app_src_push_buffer failed with flow=" << flow << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
 void DualCameraRecorder::close_writers() {
-    auto close_pipe = [](void*& pipe, void*& appsrc) {
+    auto close_pipe = [](void*& pipe_ptr, void*& appsrc_ptr) {
+        auto* pipe = static_cast<GstElement*>(pipe_ptr);
+        auto* appsrc = static_cast<GstElement*>(appsrc_ptr);
+
+        if (pipe == nullptr) {
+            if (appsrc != nullptr) {
+                gst_object_unref(appsrc);
+                appsrc_ptr = nullptr;
+            }
+            return;
+        }
+
         if (appsrc != nullptr) {
-            gst_object_unref(static_cast<GstElement*>(appsrc));
-            appsrc = nullptr;
+            gst_app_src_end_of_stream(GST_APP_SRC(appsrc));
         }
-        if (pipe != nullptr) {
-            auto* gst_pipe = static_cast<GstElement*>(pipe);
-            gst_element_send_event(gst_pipe, gst_event_new_eos());
-            gst_element_set_state(gst_pipe, GST_STATE_NULL);
-            gst_object_unref(gst_pipe);
-            pipe = nullptr;
+
+        GstBus* bus = gst_element_get_bus(pipe);
+        if (bus != nullptr) {
+            GstMessage* message = gst_bus_timed_pop_filtered(bus, kBusDrainTimeout, static_cast<GstMessageType>(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
+            if (message != nullptr) {
+                if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
+                    GError* error = nullptr;
+                    gchar* debug = nullptr;
+                    gst_message_parse_error(message, &error, &debug);
+                    std::cerr << "GStreamer finalization error: " << (error != nullptr ? error->message : "unknown") << std::endl;
+                    if (error != nullptr) {
+                        g_error_free(error);
+                    }
+                    g_free(debug);
+                }
+                gst_message_unref(message);
+            }
+            gst_object_unref(bus);
         }
+
+        gst_element_set_state(pipe, GST_STATE_NULL);
+
+        if (appsrc != nullptr) {
+            gst_object_unref(appsrc);
+            appsrc_ptr = nullptr;
+        }
+
+        gst_object_unref(pipe);
+        pipe_ptr = nullptr;
     };
 
     close_pipe(gst_rs_pipeline_, gst_rs_appsrc_);
@@ -297,44 +469,55 @@ void DualCameraRecorder::close_webcam_v4l2() {
 
 void DualCameraRecorder::realsense_capture_loop() {
     auto* pipeline = static_cast<rs2::pipeline*>(rs_pipeline_);
-    uint64_t frame_id = 0;
 
-    while (running_.load()) {
+    while (running_.load(std::memory_order_relaxed)) {
         try {
-            rs2::frameset frames = pipeline->wait_for_frames();
+            rs2::frameset frames;
+            if (!pipeline->poll_for_frames(&frames)) {
+                std::this_thread::sleep_for(kCapturePollTimeout);
+                continue;
+            }
+
             rs2::video_frame color = frames.get_color_frame();
             if (!color) {
                 continue;
             }
 
-            FramePacket pkt(rs_frame_bytes_);
-            pkt.frame_id = frame_id++;
-            pkt.timestamp_ns = static_cast<int64_t>(color.get_timestamp() * 1000000.0);
-            pkt.width = cfg_.width;
-            pkt.height = cfg_.height;
-            pkt.stride_bytes = cfg_.width * 3;
-            pkt.valid = true;
-
-            std::memcpy(pkt.payload.data(), color.get_data(), rs_frame_bytes_);
-            rs_ring_.push(std::move(pkt));
-            metrics_.rs_captured.fetch_add(1);
-        } catch (...) {
-            if (!running_.load()) {
+            rs_latest_.store(now_monotonic_ns(),
+                             cfg_.width,
+                             cfg_.height,
+                             cfg_.width * 3,
+                             static_cast<const uint8_t*>(color.get_data()),
+                             rs_frame_bytes_);
+            metrics_.rs_captured.fetch_add(1, std::memory_order_relaxed);
+        } catch (const std::exception&) {
+            if (!running_.load(std::memory_order_relaxed)) {
                 break;
             }
+            std::this_thread::sleep_for(kCapturePollTimeout);
+        } catch (...) {
+            if (!running_.load(std::memory_order_relaxed)) {
+                break;
+            }
+            std::this_thread::sleep_for(kCapturePollTimeout);
         }
     }
 }
 
 void DualCameraRecorder::webcam_capture_loop() {
-    uint64_t frame_id = 0;
-
-    while (running_.load()) {
+    while (running_.load(std::memory_order_relaxed)) {
         pollfd pfd{};
         pfd.fd = wc_fd_;
         pfd.events = POLLIN;
-        int pr = poll(&pfd, 1, 1000);
-        if (pr <= 0) {
+
+        const int pr = poll(&pfd, 1, static_cast<int>(kCapturePollTimeout.count()));
+        if (pr < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            continue;
+        }
+        if (pr == 0) {
             continue;
         }
 
@@ -346,113 +529,151 @@ void DualCameraRecorder::webcam_capture_loop() {
             continue;
         }
 
-        FramePacket pkt(wc_frame_bytes_);
-        pkt.frame_id = frame_id++;
-        pkt.timestamp_ns = static_cast<int64_t>(buf.timestamp.tv_sec) * 1000000000LL +
-                           static_cast<int64_t>(buf.timestamp.tv_usec) * 1000LL;
-        pkt.width = cfg_.width;
-        pkt.height = cfg_.height;
-        pkt.stride_bytes = cfg_.width * 2;
-        pkt.valid = true;
+        if (buf.index >= wc_buffers_.size() || wc_buffers_[buf.index].start == nullptr) {
+            xioctl(wc_fd_, VIDIOC_QBUF, &buf);
+            continue;
+        }
 
-        const auto bytes_used = std::min<size_t>(buf.bytesused, pkt.payload.size());
-        std::memcpy(pkt.payload.data(), wc_buffers_[buf.index].start, bytes_used);
+        const int64_t timestamp_ns = static_cast<int64_t>(buf.timestamp.tv_sec) * 1000000000LL +
+                                     static_cast<int64_t>(buf.timestamp.tv_usec) * 1000LL;
+        const size_t bytes_used = std::min<size_t>(buf.bytesused, wc_frame_bytes_);
 
-        wc_ring_.push(std::move(pkt));
-        metrics_.wc_captured.fetch_add(1);
+        (void)timestamp_ns;
+        wc_latest_.store(now_monotonic_ns(),
+                         cfg_.width,
+                         cfg_.height,
+                         cfg_.width * 2,
+                         static_cast<const uint8_t*>(wc_buffers_[buf.index].start),
+                         bytes_used);
+        metrics_.wc_captured.fetch_add(1, std::memory_order_relaxed);
 
         xioctl(wc_fd_, VIDIOC_QBUF, &buf);
     }
 }
 
 void DualCameraRecorder::sync_writer_loop() {
-    std::optional<FramePacket> rs_pending;
-    std::optional<FramePacket> wc_pending;
+    const int64_t interval_ns = std::max<int64_t>(1, writer_interval_ns_);
+    int64_t next_tick_ns = now_monotonic_ns();
 
-    const int64_t tolerance_ns = static_cast<int64_t>(cfg_.sync_tolerance_ms) * 1000000LL;
-
-    while (running_.load()) {
-        if (!rs_pending.has_value()) {
-            FramePacket pkt;
-            if (rs_ring_.pop(pkt, std::chrono::milliseconds(100))) {
-                rs_pending = std::move(pkt);
-            }
-        }
-
-        if (!wc_pending.has_value()) {
-            FramePacket pkt;
-            if (wc_ring_.pop(pkt, std::chrono::milliseconds(100))) {
-                wc_pending = std::move(pkt);
-            }
-        }
-
-        if (!rs_pending.has_value() || !wc_pending.has_value()) {
+    while (running_.load(std::memory_order_relaxed)) {
+        const int64_t now_ns = now_monotonic_ns();
+        if (now_ns < next_tick_ns) {
+            const int64_t sleep_ns = std::min<int64_t>(next_tick_ns - now_ns, std::chrono::duration_cast<std::chrono::nanoseconds>(kWriterSleepQuantum).count());
+            std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
             continue;
         }
 
-        int64_t wc_corrected = wc_pending->timestamp_ns - webcam_offset_ns_;
-        int64_t delta = rs_pending->timestamp_ns - wc_corrected;
-        int64_t abs_delta = std::llabs(delta);
+        const int64_t pts_ns = std::max<int64_t>(0, next_tick_ns - recording_start_ns_);
+        const int64_t tick_now_ns = now_monotonic_ns();
 
-        if (abs_delta <= tolerance_ns) {
-            webcam_offset_ns_ = static_cast<int64_t>(0.98 * static_cast<double>(webcam_offset_ns_) +
-                                                     0.02 * static_cast<double>(wc_pending->timestamp_ns - rs_pending->timestamp_ns));
+        FrameSnapshot rs_snapshot;
+        FrameSnapshot wc_snapshot;
 
-            auto push_to_appsrc = [](void* src_ptr, const uint8_t* data, size_t size, int64_t ts_ns) {
-                auto* src = GST_APP_SRC(src_ptr);
-                GstBuffer* buf = gst_buffer_new_allocate(nullptr, size, nullptr);
-                GstMapInfo map{};
-                if (gst_buffer_map(buf, &map, GST_MAP_WRITE)) {
-                    std::memcpy(map.data, data, size);
-                    gst_buffer_unmap(buf, &map);
-                }
-                GST_BUFFER_PTS(buf) = ts_ns;
-                GST_BUFFER_DTS(buf) = ts_ns;
-                GST_BUFFER_DURATION(buf) = GST_CLOCK_TIME_NONE;
-                gst_app_src_push_buffer(src, buf);
-            };
+        const bool rs_ready = rs_latest_.snapshot(rs_snapshot);
+        const bool wc_ready = wc_latest_.snapshot(wc_snapshot);
 
-            // Webcam is YUYV; convert stage is expected in final production pipeline.
-            // For this dedicated path, we publish bytes as-is for deterministic timing instrumentation.
-            push_to_appsrc(gst_rs_appsrc_, rs_pending->payload.data(), rs_pending->payload.size(), rs_pending->timestamp_ns);
-            push_to_appsrc(gst_wc_appsrc_, wc_pending->payload.data(), wc_pending->payload.size(), wc_pending->timestamp_ns);
-
-            metrics_.rs_written.fetch_add(1);
-            metrics_.wc_written.fetch_add(1);
-
-            rs_pending.reset();
-            wc_pending.reset();
-            continue;
-        }
-
-        metrics_.sync_mismatch.fetch_add(1);
-        if (rs_pending->timestamp_ns < wc_corrected) {
-            metrics_.rs_dropped_unmatched.fetch_add(1);
-            rs_pending.reset();
+        if (!rs_ready || !wc_ready) {
+            metrics_.pair_skipped_empty.fetch_add(1, std::memory_order_relaxed);
+            if (!rs_ready) {
+                metrics_.rs_skipped_empty.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (!wc_ready) {
+                metrics_.wc_skipped_empty.fetch_add(1, std::memory_order_relaxed);
+            }
+        } else if (rs_snapshot.generation == rs_last_written_generation_ ||
+                   wc_snapshot.generation == wc_last_written_generation_) {
+            metrics_.pair_skipped_stale.fetch_add(1, std::memory_order_relaxed);
+            if (rs_snapshot.generation == rs_last_written_generation_) {
+                metrics_.rs_skipped_stale.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (wc_snapshot.generation == wc_last_written_generation_) {
+                metrics_.wc_skipped_stale.fetch_add(1, std::memory_order_relaxed);
+            }
+        } else if ((tick_now_ns - rs_snapshot.packet.timestamp_ns) > max_frame_age_ns_ ||
+                   (tick_now_ns - wc_snapshot.packet.timestamp_ns) > max_frame_age_ns_) {
+            metrics_.pair_skipped_age.fetch_add(1, std::memory_order_relaxed);
         } else {
-            metrics_.wc_dropped_unmatched.fetch_add(1);
-            wc_pending.reset();
+            const bool rs_ok = push_frame(gst_rs_appsrc_, rs_snapshot.packet, pts_ns, interval_ns);
+            const bool wc_ok = push_frame(gst_wc_appsrc_, wc_snapshot.packet, pts_ns, interval_ns);
+
+            if (rs_ok && wc_ok) {
+                rs_last_written_generation_ = rs_snapshot.generation;
+                wc_last_written_generation_ = wc_snapshot.generation;
+                metrics_.rs_written.fetch_add(1, std::memory_order_relaxed);
+                metrics_.wc_written.fetch_add(1, std::memory_order_relaxed);
+                metrics_.paired_written.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                if (!rs_ok) {
+                    metrics_.rs_push_failures.fetch_add(1, std::memory_order_relaxed);
+                }
+                if (!wc_ok) {
+                    metrics_.wc_push_failures.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        }
+
+        metrics_.writer_ticks.fetch_add(1, std::memory_order_relaxed);
+
+        next_tick_ns += interval_ns;
+        const int64_t lateness_ns = now_monotonic_ns() - next_tick_ns;
+        if (lateness_ns > interval_ns) {
+            next_tick_ns = now_monotonic_ns() + interval_ns;
         }
     }
 }
 
 void DualCameraRecorder::metrics_loop() {
     using namespace std::chrono_literals;
-    while (running_.load()) {
+    while (running_.load(std::memory_order_relaxed)) {
         std::this_thread::sleep_for(1s);
         std::cout
             << "metrics "
-            << "rs_cap=" << metrics_.rs_captured.load() << ' '
-            << "wc_cap=" << metrics_.wc_captured.load() << ' '
-            << "rs_wr=" << metrics_.rs_written.load() << ' '
-            << "wc_wr=" << metrics_.wc_written.load() << ' '
-            << "rs_drop=" << metrics_.rs_dropped_unmatched.load() << ' '
-            << "wc_drop=" << metrics_.wc_dropped_unmatched.load() << ' '
-            << "sync_mismatch=" << metrics_.sync_mismatch.load() << ' '
-            << "rs_overflow=" << rs_ring_.overflows() << ' '
-            << "wc_overflow=" << wc_ring_.overflows()
+            << "rs_cap=" << metrics_.rs_captured.load(std::memory_order_relaxed) << ' '
+            << "wc_cap=" << metrics_.wc_captured.load(std::memory_order_relaxed) << ' '
+            << "rs_wr=" << metrics_.rs_written.load(std::memory_order_relaxed) << ' '
+            << "wc_wr=" << metrics_.wc_written.load(std::memory_order_relaxed) << ' '
+            << "rs_empty=" << metrics_.rs_skipped_empty.load(std::memory_order_relaxed) << ' '
+            << "wc_empty=" << metrics_.wc_skipped_empty.load(std::memory_order_relaxed) << ' '
+            << "rs_stale=" << metrics_.rs_skipped_stale.load(std::memory_order_relaxed) << ' '
+            << "wc_stale=" << metrics_.wc_skipped_stale.load(std::memory_order_relaxed) << ' '
+            << "pair_wr=" << metrics_.paired_written.load(std::memory_order_relaxed) << ' '
+            << "pair_empty=" << metrics_.pair_skipped_empty.load(std::memory_order_relaxed) << ' '
+            << "pair_stale=" << metrics_.pair_skipped_stale.load(std::memory_order_relaxed) << ' '
+            << "pair_age=" << metrics_.pair_skipped_age.load(std::memory_order_relaxed) << ' '
+            << "rs_push_fail=" << metrics_.rs_push_failures.load(std::memory_order_relaxed) << ' '
+            << "wc_push_fail=" << metrics_.wc_push_failures.load(std::memory_order_relaxed) << ' '
+            << "ticks=" << metrics_.writer_ticks.load(std::memory_order_relaxed)
             << std::endl;
     }
+}
+
+void DualCameraRecorder::print_validation_summary() const {
+    const int64_t stop_ns = recording_stop_ns_ > 0 ? recording_stop_ns_ : now_monotonic_ns();
+    const int64_t elapsed_ns = std::max<int64_t>(1, stop_ns - recording_start_ns_);
+    const double elapsed_sec = static_cast<double>(elapsed_ns) / 1000000000.0;
+    const double rs_fps = static_cast<double>(metrics_.rs_written.load(std::memory_order_relaxed)) / elapsed_sec;
+    const double wc_fps = static_cast<double>(metrics_.wc_written.load(std::memory_order_relaxed)) / elapsed_sec;
+    const double paired_fps = static_cast<double>(metrics_.paired_written.load(std::memory_order_relaxed)) / elapsed_sec;
+
+    std::cout
+        << "final "
+        << "elapsed_s=" << elapsed_sec << ' '
+        << "rs_written=" << metrics_.rs_written.load(std::memory_order_relaxed) << ' '
+        << "wc_written=" << metrics_.wc_written.load(std::memory_order_relaxed) << ' '
+        << "rs_fps=" << rs_fps << ' '
+        << "wc_fps=" << wc_fps << ' '
+        << "pair_written=" << metrics_.paired_written.load(std::memory_order_relaxed) << ' '
+        << "pair_fps=" << paired_fps << ' '
+        << "pair_empty=" << metrics_.pair_skipped_empty.load(std::memory_order_relaxed) << ' '
+        << "pair_stale=" << metrics_.pair_skipped_stale.load(std::memory_order_relaxed) << ' '
+        << "pair_age=" << metrics_.pair_skipped_age.load(std::memory_order_relaxed) << ' '
+        << "rs_empty=" << metrics_.rs_skipped_empty.load(std::memory_order_relaxed) << ' '
+        << "wc_empty=" << metrics_.wc_skipped_empty.load(std::memory_order_relaxed) << ' '
+        << "rs_stale=" << metrics_.rs_skipped_stale.load(std::memory_order_relaxed) << ' '
+        << "wc_stale=" << metrics_.wc_skipped_stale.load(std::memory_order_relaxed) << ' '
+        << "rs_push_fail=" << metrics_.rs_push_failures.load(std::memory_order_relaxed) << ' '
+        << "wc_push_fail=" << metrics_.wc_push_failures.load(std::memory_order_relaxed)
+        << std::endl;
 }
 
 int64_t DualCameraRecorder::now_monotonic_ns() const {

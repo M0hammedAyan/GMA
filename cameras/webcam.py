@@ -1,6 +1,5 @@
 import cv2
 import os
-import queue
 import threading
 import time
 
@@ -16,8 +15,18 @@ class Webcam:
 
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         
-        # Set highest resolution webcam supports
-        resolutions = [(1920, 1080), (1280, 720), (1024, 768), (640, 480)]
+        # Use Pi-safe defaults first; allow overrides through env vars.
+        env_w = int(os.getenv("GMA_WEBCAM_WIDTH", "640"))
+        env_h = int(os.getenv("GMA_WEBCAM_HEIGHT", "480"))
+        resolutions = [
+            (env_w, env_h),
+            (640, 480),
+            (960, 540),
+            (1280, 720),
+            (1920, 1080),
+        ]
+        seen = set()
+        resolutions = [r for r in resolutions if not (r in seen or seen.add(r))]
         for w, h in resolutions:
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
@@ -32,7 +41,6 @@ class Webcam:
         self._frame_lock = threading.Lock()
         self._latest_frame = None
         self._latest_ts = 0.0
-        self._record_queue = queue.Queue(maxsize=300)
         self._stop_event = threading.Event()
         self._capture_thread = None
         self._record_thread = None
@@ -59,12 +67,8 @@ class Webcam:
         self.last_error = None
         self._stop_event.clear()
         self._record_gate.clear()
-        self._record_queue = queue.Queue(maxsize=300)
         self._captured_frames = 0
         self._written_frames = 0
-        self._dropped_early = 0
-        self._dropped_late = 0
-        self._dropped_queue = 0
         self._record_started_at = time.monotonic() if started_at is None else float(started_at)
         if started_at is not None:
             self._record_gate.set()
@@ -95,18 +99,6 @@ class Webcam:
             capture_ts = time.monotonic()
             self._captured_frames += 1
 
-            item = (capture_ts, frame.copy())
-            while not self._stop_event.is_set():
-                try:
-                    self._record_queue.put_nowait(item)
-                    break
-                except queue.Full:
-                    try:
-                        _ = self._record_queue.get_nowait()
-                        self._dropped_queue += 1
-                    except queue.Empty:
-                        break
-
             with self._frame_lock:
                 self._latest_frame = frame.copy()
                 self._latest_ts = capture_ts
@@ -114,8 +106,8 @@ class Webcam:
     def _record_loop(self, out_path, target_fps):
         write_fps = float(max(1.0, target_fps))
         frame_interval = 1.0 / write_fps
-        start_wall = None
-        next_frame_time = None
+        start_wall = 0.0
+        next_frame_time = 0.0
         expected_frames = 0
 
         def _open_writer(sample_frame):
@@ -126,52 +118,52 @@ class Webcam:
                 raise RuntimeError(f"Failed to open webcam writer: {out_path}")
             return writer
 
-        def _drain_latest_item():
-            latest = None
-            while True:
-                try:
-                    latest = self._record_queue.get_nowait()
-                except queue.Empty:
-                    break
-            return latest
-
         try:
             while True:
+                if self._stop_event.is_set() and not self._record_gate.is_set():
+                    break
+
                 if not self._record_gate.is_set():
                     time.sleep(0.002)
                     continue
 
+                if start_wall <= 0.0:
+                    start_wall = self._record_started_at if self._record_started_at > 0.0 else time.monotonic()
+                    next_frame_time = start_wall
+
                 if self.writer is None:
-                    item = _drain_latest_item()
-                    if item is None:
+                    with self._frame_lock:
+                        frame = None if self._latest_frame is None else self._latest_frame.copy()
+                    if frame is None:
                         if self._stop_event.is_set():
                             break
-                        time.sleep(0.01)
+                        time.sleep(0.001)
                         continue
-                    _item_ts, frame = item
                     self.writer = _open_writer(frame)
-                    start_wall = time.monotonic()
-                    next_frame_time = start_wall
                     self.actual_fps = write_fps
                     print(f"Webcam writer opened fps={write_fps:.2f} size={frame.shape[1]}x{frame.shape[0]}")
 
-                if next_frame_time is None:
-                    next_frame_time = time.monotonic()
-
                 now = time.monotonic()
+                if self._record_stop_at is not None and now >= self._record_stop_at:
+                    self._stop_event.set()
+                    break
                 if now < next_frame_time:
                     time.sleep(min(0.01, next_frame_time - now))
                     continue
 
-                item = _drain_latest_item()
+                if now - next_frame_time > frame_interval:
+                    self._dropped_late += 1
+                    next_frame_time = now
+
                 expected_frames += 1
-                if item is None:
+                with self._frame_lock:
+                    frame = None if self._latest_frame is None else self._latest_frame.copy()
+
+                if frame is None:
                     next_frame_time += frame_interval
-                    if self._stop_event.is_set() and self._record_queue.empty():
+                    if self._stop_event.is_set():
                         break
                     continue
-
-                _frame_ts, frame = item
 
                 with self._writer_lock:
                     if self.writer is None:
@@ -191,7 +183,7 @@ class Webcam:
             print(
                 "Webcam timing stats: "
                 f"captured={self._captured_frames} written={self._written_frames} "
-                f"expected={expected_frames} dropped_queue={self._dropped_queue} "
+                f"expected={expected_frames} "
                 f"writer_fps={write_fps:.2f} effective_fps={effective_fps:.2f} "
                 f"real_s={duration_real:.2f} video_s={duration_video:.2f}"
             )
@@ -220,10 +212,14 @@ class Webcam:
         if self._record_stop_at is None:
             self._record_stop_at = time.monotonic()
         self._stop_event.set()
+        try:
+            self.cap.release()
+        except Exception:
+            pass
         if self._capture_thread is not None and self._capture_thread.is_alive():
-            self._capture_thread.join()
+            self._capture_thread.join(timeout=2.0)
         if self._record_thread is not None and self._record_thread.is_alive():
-            self._record_thread.join()
+            self._record_thread.join(timeout=3.0)
         self._capture_thread = None
         self._record_thread = None
 
@@ -235,9 +231,3 @@ class Webcam:
         with self._frame_lock:
             self._latest_frame = None
             self._latest_ts = 0.0
-        while True:
-            try:
-                _ = self._record_queue.get_nowait()
-            except queue.Empty:
-                break
-        self.cap.release()

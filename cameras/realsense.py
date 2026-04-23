@@ -422,12 +422,8 @@ class RealSenseCamera:
         self._record_last_depth = None
         self._record_blank_color = None
         self._record_blank_depth = None
-        self._record_queue = queue.Queue(maxsize=300)
-        self._record_queue_drop = 0
         self._captured_frames = 0
         self._written_frames = 0
-        self._dropped_early = 0
-        self._dropped_late = 0
         self._rs_hw_base_ts = None
         self._record_started_at = 0.0
         self._record_stop_at = None
@@ -440,10 +436,10 @@ class RealSenseCamera:
 
     def _start_pipeline_with_fallbacks(self):
         attempts = [
-            ((1920, 1080, 30), (1280, 720, 30), "color 1920x1080@30 + depth 1280x720@30"),
+            ((640, 480, 30), (640, 480, 30), "color 640x480@30 + depth 640x480@30"),
             ((1280, 720, 30), (640, 480, 30), "color 1280x720@30 + depth 640x480@30"),
             ((1280, 720, 15), (640, 480, 15), "color 1280x720@15 + depth 640x480@15"),
-            ((640, 480, 30), (640, 480, 30), "color 640x480@30 + depth 640x480@30"),
+            ((1920, 1080, 30), (1280, 720, 30), "color 1920x1080@30 + depth 1280x720@30"),
         ]
 
         ctx = rs.context()
@@ -519,7 +515,14 @@ class RealSenseCamera:
         color_out_path = f"{base}.avi"
         depth_out_path = f"{base}_depth.avi"
 
-        self.video_fps = max(1, int(video_fps))
+        requested_fps = max(1, int(video_fps))
+        sensor_fps = max(1, int(getattr(self, "sensor_fps", requested_fps)))
+        self.video_fps = min(requested_fps, sensor_fps)
+        if self.video_fps != requested_fps:
+            print(
+                f"RealSense writer FPS clamped from {requested_fps} to {self.video_fps} "
+                f"to match active sensor FPS={sensor_fps}"
+            )
 
         with self._record_lock:
             self._record_latest_color = None
@@ -533,12 +536,8 @@ class RealSenseCamera:
         self.stop_event.clear()
         self._record_gate.clear()
         self.last_error = None
-        self._record_queue = queue.Queue(maxsize=300)
-        self._record_queue_drop = 0
         self._captured_frames = 0
         self._written_frames = 0
-        self._dropped_early = 0
-        self._dropped_late = 0
         self._rs_hw_base_ts = None
         self.recording = True
         self.running = True
@@ -604,18 +603,6 @@ class RealSenseCamera:
 
             self._captured_frames += 1
 
-            item = (capture_ts, color.copy(), depth_colormap.copy())
-            while not self.stop_event.is_set():
-                try:
-                    self._record_queue.put_nowait(item)
-                    break
-                except queue.Full:
-                    try:
-                        _ = self._record_queue.get_nowait()
-                        self._record_queue_drop += 1
-                    except queue.Empty:
-                        break
-
             with self._record_lock:
                 self._record_latest_color = color.copy()
                 self._record_latest_depth = depth_colormap.copy()
@@ -640,8 +627,8 @@ class RealSenseCamera:
     def _record_loop(self, color_out_path, depth_out_path):
         write_fps = float(max(1, int(self.video_fps)))
         frame_interval = 1.0 / write_fps
-        start_wall = None
-        next_frame_time = None
+        start_wall = 0.0
+        next_frame_time = 0.0
         expected_frames = 0
 
         color_writer = None
@@ -656,62 +643,64 @@ class RealSenseCamera:
                 temp_color_writer = cv2.VideoWriter(color_out_path, fourcc, write_fps, (w, h))
                 temp_depth_writer = cv2.VideoWriter(depth_out_path, fourcc, write_fps, (dw, dh))
                 if temp_color_writer.isOpened() and temp_depth_writer.isOpened():
-                    color_writer = temp_color_writer
-                    depth_writer = temp_depth_writer
                     print(
                         f"RealSense writers opened codec={codec} fps={write_fps:.2f} "
                         f"color={color_out_path} depth={depth_out_path}"
                     )
-                    return color_writer, depth_writer
+                    return temp_color_writer, temp_depth_writer
                 temp_color_writer.release()
                 temp_depth_writer.release()
 
             raise RuntimeError("Failed to open RealSense writers")
 
-        def _drain_latest_item():
-            latest = None
-            while True:
-                try:
-                    latest = self._record_queue.get_nowait()
-                except queue.Empty:
-                    break
-            return latest
-
         try:
             while True:
+                if self.stop_event.is_set() and not self._record_gate.is_set():
+                    break
+
                 if not self._record_gate.is_set():
                     time.sleep(0.002)
                     continue
 
-                if color_writer is None or depth_writer is None:
-                    item = _drain_latest_item()
-                    if item is None:
-                        if self.stop_event.is_set():
-                            break
-                        time.sleep(0.01)
-                        continue
-                    _capture_ts, color, depth_colormap = item
-                    color_writer, depth_writer = _open_writers(color, depth_colormap)
-                    start_wall = time.monotonic()
+                if start_wall <= 0.0:
+                    start_wall = self._record_started_at if self._record_started_at > 0.0 else time.monotonic()
                     next_frame_time = start_wall
 
-                if next_frame_time is None:
-                    next_frame_time = time.monotonic()
+                if color_writer is None or depth_writer is None:
+                    with self._record_lock:
+                        color = None if self._record_latest_color is None else self._record_latest_color.copy()
+                        depth_colormap = None if self._record_latest_depth is None else self._record_latest_depth.copy()
+                        _capture_ts = float(self._record_latest_ts)
+
+                    if color is None:
+                        if self.stop_event.is_set():
+                            break
+                        time.sleep(0.001)
+                        continue
+
+                    color_writer, depth_writer = _open_writers(color, depth_colormap)
 
                 now = time.monotonic()
+                if self._record_stop_at is not None and now >= self._record_stop_at:
+                    self.stop_event.set()
+                    break
                 if now < next_frame_time:
                     time.sleep(min(0.01, next_frame_time - now))
                     continue
 
-                item = _drain_latest_item()
+                if now - next_frame_time > frame_interval:
+                    next_frame_time = now
+
                 expected_frames += 1
-                if item is None:
+                with self._record_lock:
+                    color = None if self._record_latest_color is None else self._record_latest_color.copy()
+                    depth_colormap = None if self._record_latest_depth is None else self._record_latest_depth.copy()
+
+                if color is None:
                     next_frame_time += frame_interval
-                    if self.stop_event.is_set() and self._record_queue.empty():
+                    if self.stop_event.is_set():
                         break
                     continue
-
-                _capture_ts, color, depth_colormap = item
 
                 depth_frame = depth_colormap
                 if depth_frame is None:
@@ -739,7 +728,7 @@ class RealSenseCamera:
             print(
                 "RealSense timing stats: "
                 f"captured={self._captured_frames} written={self._written_frames} "
-                f"expected={expected_frames} dropped_queue={self._record_queue_drop} "
+                f"expected={expected_frames} "
                 f"writer_fps={write_fps:.2f} effective_fps={effective_fps:.2f} "
                 f"real_s={duration_real:.2f} video_s={duration_video:.2f}"
             )
@@ -792,9 +781,9 @@ class RealSenseCamera:
                 pass
 
         if self.capture_worker is not None and self.capture_worker.is_alive():
-            self.capture_worker.join()
+            self.capture_worker.join(timeout=2.0)
         if self.recorder_worker is not None and self.recorder_worker.is_alive():
-            self.recorder_worker.join()
+            self.recorder_worker.join(timeout=3.0)
 
         self.capture_worker = None
         self.recorder_worker = None
@@ -812,8 +801,3 @@ class RealSenseCamera:
             self._record_latest_color = None
             self._record_latest_depth = None
             self._record_latest_ts = 0.0
-        while True:
-            try:
-                _ = self._record_queue.get_nowait()
-            except queue.Empty:
-                break

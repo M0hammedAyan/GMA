@@ -55,13 +55,9 @@ class Recorder:
             self.realsense = RealSenseCamera()
             self.webcam = Webcam(webcam_device)
 
-            sensor_fps = int(getattr(self.realsense, "sensor_fps", self.capture_fps))
             requested_fps = max(1, int(self.capture_fps))
-            self.capture_fps = max(1, min(requested_fps, sensor_fps))
-            print(
-                f"Capture FPS requested={requested_fps} effective={self.capture_fps} "
-                f"(realsense_sensor={sensor_fps})"
-            )
+            self.capture_fps = requested_fps
+            print(f"Capture FPS requested={requested_fps} effective={self.capture_fps}")
 
             os.makedirs(session_path, exist_ok=True)
             self.realsense.setup_folders(session_path)

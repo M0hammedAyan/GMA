@@ -21,9 +21,7 @@ int main(int argc, char** argv) {
     DualCameraRecorder::Config cfg;
     cfg.width = 640;
     cfg.height = 480;
-    cfg.fps = 15;
-    cfg.sync_tolerance_ms = 15;
-    cfg.buffer_seconds = 10;
+    cfg.fps = 30;
 
     DualCameraRecorder recorder(cfg);
     if (!recorder.start()) {
