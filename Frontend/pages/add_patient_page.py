@@ -55,7 +55,7 @@ class AddPatientPage(QWidget):
         self.dob_input.setCalendarPopup(True)
         self.dob_input.setMinimumDate(QDate(1900, 1, 1))
         self.dob_input.setSpecialValueText("Select DOB")
-        self.dob_input.setDate(QDate(1900, 1, 1))
+        self._reset_dob()
         self.age_input = QSpinBox()
         self.age_input.setRange(0, 50)
         self.age_input.setSpecialValueText("Enter weeks")
@@ -114,11 +114,19 @@ class AddPatientPage(QWidget):
 
     def load_new_patient(self):
         self.name_input.clear()
-        self.dob_input.setDate(QDate(1900, 1, 1))
+        self._reset_dob()
         self.age_input.setValue(0)
         self.gender_input.setCurrentIndex(0)
         self.uhid_input.setText(self.generate_uhid())
         self.gma_uhid_input.setText(self.generate_gma_uhid())
+
+    def _reset_dob(self):
+        sentinel = self.dob_input.minimumDate()
+        self.dob_input.setDate(sentinel)
+        today = QDate.currentDate()
+        calendar = self.dob_input.calendarWidget()
+        calendar.setSelectedDate(today)
+        calendar.setCurrentPage(today.year(), today.month())
 
     def get_patient(self):
         if not self.uhid_input.text().strip():
@@ -128,7 +136,7 @@ class AddPatientPage(QWidget):
 
         dob_value = self.dob_input.date()
         dob_text = dob_value.toString("yyyy-MM-dd")
-        if dob_value == QDate(1900, 1, 1):
+        if dob_value == self.dob_input.minimumDate():
             dob_text = date.today().strftime("%Y-%m-%d")
 
         age_value = self.age_input.value()

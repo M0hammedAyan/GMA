@@ -1,5 +1,6 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -81,8 +82,12 @@ class RecordPage(QWidget):
         self.gps_chip.setObjectName("previewChip")
         self.timestamp_chip = QLabel("Timestamp: Not recording yet")
         self.timestamp_chip.setObjectName("previewChip")
+        self.camera_switch = QComboBox()
+        self.camera_switch.setObjectName("previewChip")
+        self.camera_switch.addItems(["Webcam", "RealSense Color", "RealSense Depth"])
         chip_row.addWidget(self.gps_chip)
         chip_row.addWidget(self.timestamp_chip)
+        chip_row.addWidget(self.camera_switch)
         chip_row.addStretch(1)
         preview_layout.addLayout(chip_row)
 
@@ -107,8 +112,8 @@ class RecordPage(QWidget):
 
         record_row = QHBoxLayout()
         record_row.setSpacing(10)
-        self.action_btn = QPushButton("Start / Stop Recording")
-        self.action_btn.setObjectName("recordingButton")
+        self.action_btn = QPushButton("Start")
+        self.action_btn.setObjectName("primaryButton")
         self.upload_btn = QPushButton("Upload")
         self.upload_btn.setObjectName("secondaryButton")
         self.timer_label = QLabel("00:00:00")
@@ -213,3 +218,6 @@ class RecordPage(QWidget):
         self.timestamp_chip.setText(f"Timestamp: {message}")
         self.standby_chip.style().unpolish(self.standby_chip)
         self.standby_chip.style().polish(self.standby_chip)
+
+    def selected_preview_source(self):
+        return self.camera_switch.currentText().strip().lower()

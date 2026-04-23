@@ -111,14 +111,6 @@ QLabel#homeStatSubtitle {
 	color: #9CA3AF;
 	background: transparent;
 }
-QLabel#homeStatArrow {
-	font-size: 18px;
-	font-weight: 700;
-	background: #1C2A3F;
-	border: 1px solid #304562;
-	border-radius: 11px;
-	color: #93C5FD;
-}
 QFrame#homeQuickAction {
 	background: #101623;
 	border: 1px solid #222F45;
@@ -148,12 +140,6 @@ QLabel#homeQuickSubtitle {
 	font-weight: 500;
 	color: #9CA3AF;
 	background: transparent;
-}
-QLabel#homeQuickArrow {
-	font-size: 20px;
-	font-weight: 700;
-	background: transparent;
-	color: #D1D5DB;
 }
 QLabel#statsTitle {
 	color: #D1D5DB;
@@ -411,6 +397,19 @@ QPushButton#backButton {
 	padding: 4px 8px;
 	max-width: 190px;
 }
+QPushButton#profileBackButton {
+	background: #2563EB;
+	border: 1px solid #2563EB;
+	padding: 6px 12px;
+	max-width: 210px;
+	min-height: 34px;
+	font-weight: 700;
+	color: #FFFFFF;
+}
+QPushButton#profileBackButton:hover {
+	background: #1D4ED8;
+	border: 1px solid #1D4ED8;
+}
 QPushButton#secondaryButton {
 	background: #18181B;
 	border: 1px solid #27272A;
@@ -522,6 +521,34 @@ QLineEdit#compactInput, QDateEdit#compactInput, QSpinBox#compactInput, QComboBox
 	border: 1px solid #27272A;
 	border-radius: 10px;
 	padding: 6px 8px;
+}
+QComboBox#compactInput QAbstractItemView {
+	background: #111113;
+	color: #FAFAFA;
+	border: 1px solid #27272A;
+	selection-background-color: #2563EB;
+	selection-color: #FFFFFF;
+}
+QCalendarWidget {
+	background: #111113;
+	color: #FAFAFA;
+}
+QCalendarWidget QWidget {
+	background: #111113;
+	color: #FAFAFA;
+}
+QCalendarWidget QToolButton {
+	background: #18181B;
+	color: #FAFAFA;
+	border: 1px solid #27272A;
+	border-radius: 6px;
+	padding: 4px 8px;
+}
+QCalendarWidget QAbstractItemView {
+	background: #111113;
+	color: #FAFAFA;
+	selection-background-color: #2563EB;
+	selection-color: #FFFFFF;
 }
 QHeaderView::section {
 	background: #111113;
@@ -714,12 +741,6 @@ QLabel#patientName {
 QLabel#patientMeta {
 	font-size: 12px;
 	font-weight: 500;
-	color: #94A3B8;
-	background: transparent;
-}
-QLabel#patientRowChevron {
-	font-size: 20px;
-	font-weight: 700;
 	color: #94A3B8;
 	background: transparent;
 }
@@ -988,14 +1009,6 @@ QLabel#homeStatSubtitle {
 	color: #334155;
 	background: transparent;
 }
-QLabel#homeStatArrow {
-	font-size: 18px;
-	font-weight: 700;
-	background: #EEF7F5;
-	border: 1px solid #D8E8E5;
-	border-radius: 11px;
-	color: #2F6A61;
-}
 QFrame#homeQuickAction {
 	background: #FFFFFF;
 	border: 1px solid #E5E7EB;
@@ -1025,12 +1038,6 @@ QLabel#homeQuickSubtitle {
 	font-weight: 500;
 	color: #334155;
 	background: transparent;
-}
-QLabel#homeQuickArrow {
-	font-size: 20px;
-	font-weight: 700;
-	background: transparent;
-	color: #1F2937;
 }
 QLabel#statsTitle {
 	color: #334155;
@@ -1294,6 +1301,19 @@ QPushButton#backButton {
 	padding: 4px 8px;
 	max-width: 190px;
 }
+QPushButton#profileBackButton {
+	background: #2563EB;
+	border: 1px solid #2563EB;
+	padding: 6px 12px;
+	max-width: 210px;
+	min-height: 34px;
+	font-weight: 700;
+	color: #FFFFFF;
+}
+QPushButton#profileBackButton:hover {
+	background: #1D4ED8;
+	border: 1px solid #1D4ED8;
+}
 QPushButton#secondaryButton {
 	background: #FFFFFF;
 	border: 1px solid #D1D5DB;
@@ -1406,6 +1426,34 @@ QLineEdit#compactInput, QDateEdit#compactInput, QSpinBox#compactInput, QComboBox
 	border: 1px solid #D1D5DB;
 	border-radius: 10px;
 	padding: 6px 8px;
+}
+QComboBox#compactInput QAbstractItemView {
+	background: #FFFFFF;
+	color: #111827;
+	border: 1px solid #D1D5DB;
+	selection-background-color: #DBEAFE;
+	selection-color: #1E3A8A;
+}
+QCalendarWidget {
+	background: #FFFFFF;
+	color: #111827;
+}
+QCalendarWidget QWidget {
+	background: #FFFFFF;
+	color: #111827;
+}
+QCalendarWidget QToolButton {
+	background: #FFFFFF;
+	color: #111827;
+	border: 1px solid #D1D5DB;
+	border-radius: 6px;
+	padding: 4px 8px;
+}
+QCalendarWidget QAbstractItemView {
+	background: #FFFFFF;
+	color: #111827;
+	selection-background-color: #DBEAFE;
+	selection-color: #1E3A8A;
 }
 QHeaderView::section {
 	background: #DDEEFF;
@@ -1600,12 +1648,6 @@ QLabel#patientMeta {
 	font-size: 12px;
 	font-weight: 500;
 	color: #475569;
-	background: transparent;
-}
-QLabel#patientRowChevron {
-	font-size: 20px;
-	font-weight: 700;
-	color: #64748B;
 	background: transparent;
 }
 QPushButton#patientActionButton {

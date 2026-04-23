@@ -2,6 +2,7 @@ import glob
 import os
 import re
 import subprocess
+import sys
 from typing import List, Optional, Tuple
 
 import cv2
@@ -152,5 +153,28 @@ def find_webcam() -> Optional[str]:
 def check_realsense():
     if rs is None:
         return False
-    ctx = rs.context()
-    return len(ctx.query_devices()) > 0
+
+    # Probe in a subprocess so native RealSense crashes do not terminate the UI process.
+    probe_code = (
+        "import pyrealsense2 as rs; "
+        "ctx = rs.context(); "
+        "print(len(ctx.query_devices()))"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", probe_code],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            check=False,
+        )
+    except Exception:
+        return False
+
+    if result.returncode != 0:
+        return False
+
+    try:
+        return int((result.stdout or "").strip() or "0") > 0
+    except ValueError:
+        return False

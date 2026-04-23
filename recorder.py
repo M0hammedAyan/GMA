@@ -23,6 +23,7 @@ class Recorder:
         self.output_root = output_root or os.getenv("GMA_RECORDINGS_DIR", "recordings")
         self.capture_fps = max(1, int(os.getenv("GMA_CAPTURE_FPS", "30")))
         self.min_free_mb = max(1, int(os.getenv("GMA_MIN_FREE_MB", "512")))
+        self.allow_webcam_only = os.getenv("GMA_ALLOW_WEBCAM_ONLY", "1").lower() not in {"0", "false", "no"}
 
     def _ensure_free_space(self):
         # Guard native writers from ENOSPC-triggered aborts.
@@ -45,14 +46,15 @@ class Recorder:
         if webcam_device is None:
             raise Exception("No webcam detected")
 
-        if not check_realsense():
+        realsense_available = check_realsense()
+        if not realsense_available and not self.allow_webcam_only:
             raise Exception("RealSense not detected")
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         session_path = os.path.join(self.output_root, f"session_{timestamp}")
 
         try:
-            self.realsense = RealSenseCamera()
+            self.realsense = RealSenseCamera() if realsense_available else None
             self.webcam = Webcam(webcam_device)
 
             requested_fps = max(1, int(self.capture_fps))
@@ -60,17 +62,19 @@ class Recorder:
             print(f"Capture FPS requested={requested_fps} effective={self.capture_fps}")
 
             os.makedirs(session_path, exist_ok=True)
-            self.realsense.setup_folders(session_path)
-            self.realsense.start(
-                os.path.join(session_path, "realsense.avi"),
-                video_fps=self.capture_fps,
-            )
+            if self.realsense is not None:
+                self.realsense.setup_folders(session_path)
+                self.realsense.start(
+                    os.path.join(session_path, "realsense.avi"),
+                    video_fps=self.capture_fps,
+                )
             self.webcam.start(
                 os.path.join(session_path, "webcam.avi"),
                 video_fps=self.capture_fps,
             )
             common_start = time.monotonic()
-            self.realsense.set_recording_start_time(common_start)
+            if self.realsense is not None:
+                self.realsense.set_recording_start_time(common_start)
             self.webcam.set_recording_start_time(common_start)
         except Exception:
             self.stop()

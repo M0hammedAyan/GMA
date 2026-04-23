@@ -1,10 +1,11 @@
 from pathlib import Path
+import re
 import shutil
 import threading
 from datetime import date, datetime
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QDesktopServices, QGuiApplication
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QImage, QPixmap
 from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
 
 from Frontend.pages.dashboard_page import DashboardPage
@@ -59,6 +60,9 @@ class MainWindow(QMainWindow):
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_timer)
+        self.preview_timer = QTimer()
+        self.preview_timer.timeout.connect(self._update_live_preview)
+        self.preview_timer.start(66)
 
         self.recording_started.connect(self._handle_started)
         self.recording_start_failed.connect(self._handle_start_error)
@@ -118,8 +122,6 @@ class MainWindow(QMainWindow):
         self.patients_page.search_bar.textChanged.connect(self._apply_patient_filters)
         self.patients_page.sort_combo.currentTextChanged.connect(self._apply_patient_filters)
         self.patients_page.patientSelected.connect(self.on_patient_selected)
-        self.patients_page.patientRecordRequested.connect(self.on_patient_selected)
-        self.patients_page.patientUploadRequested.connect(self._on_patient_upload_requested)
         self.patients_page.addPatientRequested.connect(self.show_add_patient)
         self.uploads_page.patientRequested.connect(self._on_upload_patient_requested)
 
@@ -293,11 +295,90 @@ class MainWindow(QMainWindow):
             rp.action_btn.setText("Stop Recording")
         else:
             rp.action_btn.setObjectName("primaryButton")
-            rp.action_btn.setText("Start Recording")
+            rp.action_btn.setText("Start")
 
         for widget in [rp.action_btn]:
             widget.style().unpolish(widget)
             widget.style().polish(widget)
+
+    def _preview_source_key(self):
+        selected = self.record_page.selected_preview_source()
+        if selected == "realsense color":
+            return "realsense_color"
+        if selected == "realsense depth":
+            return "realsense_depth"
+        return "webcam"
+
+    def _to_qpixmap(self, frame):
+        if frame is None:
+            return None
+        if not hasattr(frame, "shape") or len(frame.shape) < 2:
+            return None
+
+        height, width = frame.shape[:2]
+        if len(frame.shape) == 2:
+            qimg = QImage(frame.data, width, height, frame.strides[0], QImage.Format_Grayscale8).copy()
+        else:
+            rgb = frame[:, :, ::-1].copy()
+            qimg = QImage(rgb.data, width, height, rgb.strides[0], QImage.Format_RGB888).copy()
+
+        return QPixmap.fromImage(qimg)
+
+    def _update_live_preview(self):
+        if self.stack.currentIndex() != 3:
+            return
+
+        frames = self.controller.get_preview_frames()
+        frame = frames.get(self._preview_source_key())
+
+        if frame is None:
+            self.record_page.preview_surface.setText("Live Camera Preview")
+            self.record_page.preview_surface.setPixmap(QPixmap())
+            return
+
+        pixmap = self._to_qpixmap(frame)
+        if pixmap is None or pixmap.isNull():
+            return
+
+        scaled = pixmap.scaled(
+            self.record_page.preview_surface.size(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.record_page.preview_surface.setPixmap(scaled)
+        self.record_page.preview_surface.setText("")
+
+    def _session_name_for_patient(self, patient_name, when=None):
+        base_name = re.sub(r"[^A-Za-z0-9_-]+", "_", (patient_name or "patient").strip())
+        base_name = re.sub(r"_+", "_", base_name).strip("_") or "patient"
+        stamp = (when or datetime.now()).strftime("%Y%m%d_%H%M%S")
+        return f"{base_name}_{stamp}"
+
+    def _rename_session_for_patient(self, session_path):
+        if not session_path:
+            return session_path
+
+        source = Path(session_path)
+        if not source.exists() or not source.is_dir():
+            return session_path
+
+        patient_name = ""
+        if self.selected_patient is not None:
+            patient_name = str(self.selected_patient.get("Name", ""))
+
+        target_name = self._session_name_for_patient(patient_name)
+        target = source.parent / target_name
+
+        suffix = 1
+        while target.exists() and target.resolve() != source.resolve():
+            target = source.parent / f"{target_name}_{suffix}"
+            suffix += 1
+
+        if target.resolve() == source.resolve():
+            return str(source)
+
+        source.rename(target)
+        return str(target)
 
     def _on_action(self):
         if self.is_recording:
@@ -417,6 +498,7 @@ class MainWindow(QMainWindow):
         self._update_required_state()
 
         self.last_saved_session = self._latest_session_path()
+        self.last_saved_session = self._rename_session_for_patient(self.last_saved_session)
         if self.last_saved_session and self.last_saved_session not in self.sessions:
             status = "pending"
             self.sessions[self.last_saved_session] = {
@@ -455,7 +537,7 @@ class MainWindow(QMainWindow):
         root = Path(self.controller.output_root)
         if not root.exists():
             return ""
-        candidates = sorted(root.glob("session_*"), key=lambda p: p.stat().st_mtime)
+        candidates = sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.stat().st_mtime)
         return str(candidates[-1]) if candidates else ""
 
     def update_timer(self):

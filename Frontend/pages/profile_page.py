@@ -11,8 +11,8 @@ class ProfilePage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        self.back_button = QPushButton("<- Back to Dashboard")
-        self.back_button.setObjectName("backButton")
+        self.back_button = QPushButton("Back to Dashboard")
+        self.back_button.setObjectName("profileBackButton")
         layout.addWidget(self.back_button)
 
         header_card = QFrame()

@@ -8,8 +8,6 @@ from Frontend.widgets.search_bar import SearchBar
 class PatientsPage(QWidget):
     addPatientRequested = Signal()
     patientSelected = Signal(dict)
-    patientRecordRequested = Signal(dict)
-    patientUploadRequested = Signal(dict)
 
     def __init__(self):
         super().__init__()
@@ -88,8 +86,6 @@ class PatientsPage(QWidget):
 
         self.patient_table = PatientTable()
         self.patient_table.cellClicked.connect(self._on_row_clicked)
-        self.patient_table.recordRequested.connect(self._on_record_requested)
-        self.patient_table.uploadRequested.connect(self._on_upload_requested)
         table_layout.addWidget(self.patient_table)
 
         layout.addWidget(top_bar)
@@ -113,13 +109,3 @@ class PatientsPage(QWidget):
         patient = self.patient_table.get_row_data(row)
         if patient is not None:
             self.patientSelected.emit(patient)
-
-    def _on_record_requested(self, row):
-        patient = self.patient_table.get_row_data(row)
-        if patient is not None:
-            self.patientRecordRequested.emit(patient)
-
-    def _on_upload_requested(self, row):
-        patient = self.patient_table.get_row_data(row)
-        if patient is not None:
-            self.patientUploadRequested.emit(patient)

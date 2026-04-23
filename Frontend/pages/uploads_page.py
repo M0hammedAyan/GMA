@@ -1,8 +1,7 @@
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from Frontend.widgets.upload_card import UploadCard
-from Frontend.widgets.stats_card import StatsCard
 
 
 class UploadsPage(QWidget):
@@ -40,32 +39,6 @@ class UploadsPage(QWidget):
         tabs.addStretch(1)
         top_layout.addLayout(tabs)
 
-        stats_panel = QFrame()
-        stats_panel.setObjectName("uploadsStatsPanel")
-        stats_layout = QGridLayout(stats_panel)
-        stats_layout.setContentsMargins(10, 10, 10, 10)
-        stats_layout.setHorizontalSpacing(8)
-        stats_layout.setVerticalSpacing(0)
-
-        self.stats_cards = {
-            "Pending": StatsCard("Pending", "0", variant="pending"),
-            "Uploaded": StatsCard("Uploaded", "0", variant="uploaded"),
-            "Rejected": StatsCard("Rejected", "0", variant="rejected"),
-        }
-        self.stats_cards["Pending"].setMinimumHeight(92)
-        self.stats_cards["Pending"].setMaximumHeight(112)
-        self.stats_cards["Uploaded"].setMinimumHeight(92)
-        self.stats_cards["Uploaded"].setMaximumHeight(112)
-        self.stats_cards["Rejected"].setMinimumHeight(92)
-        self.stats_cards["Rejected"].setMaximumHeight(112)
-
-        stats_layout.addWidget(self.stats_cards["Pending"], 0, 0)
-        stats_layout.addWidget(self.stats_cards["Uploaded"], 0, 1)
-        stats_layout.addWidget(self.stats_cards["Rejected"], 0, 2)
-        stats_layout.setColumnStretch(0, 1)
-        stats_layout.setColumnStretch(1, 1)
-        stats_layout.setColumnStretch(2, 1)
-
         list_panel = QFrame()
         list_panel.setObjectName("uploadsListPanel")
         list_layout = QVBoxLayout(list_panel)
@@ -80,12 +53,13 @@ class UploadsPage(QWidget):
         self.uploaded_tab.clicked.connect(lambda: self.set_active_tab("uploaded"))
         self.rejected_tab.clicked.connect(lambda: self.set_active_tab("rejected"))
 
+        self._counts = {"pending": 0, "uploaded": 0, "rejected": 0}
+
         list_layout.addWidget(self.pending_scroll)
         list_layout.addWidget(self.uploaded_scroll)
         list_layout.addWidget(self.rejected_scroll)
 
         layout.addWidget(top_bar)
-        layout.addWidget(stats_panel)
         layout.addWidget(list_panel, 1)
 
         self.set_active_tab("pending")
@@ -129,9 +103,22 @@ class UploadsPage(QWidget):
         self._set_cards(self.pending_layout, pending)
         self._set_cards(self.uploaded_layout, uploaded)
         self._set_cards(self.rejected_layout, rejected)
-        self.stats_cards["Pending"].set_value(len(pending))
-        self.stats_cards["Uploaded"].set_value(len(uploaded))
-        self.stats_cards["Rejected"].set_value(len(rejected))
+        self._counts = {
+            "pending": len(pending),
+            "uploaded": len(uploaded),
+            "rejected": len(rejected),
+        }
+        active = "pending"
+        if self.uploaded_tab.isChecked():
+            active = "uploaded"
+        elif self.rejected_tab.isChecked():
+            active = "rejected"
+        self._update_tab_labels(active)
+
+    def _update_tab_labels(self, active_status):
+        self.pending_tab.setText(f"Pending ({self._counts['pending']})" if active_status == "pending" else "Pending")
+        self.uploaded_tab.setText(f"Uploaded ({self._counts['uploaded']})" if active_status == "uploaded" else "Uploaded")
+        self.rejected_tab.setText(f"Rejected ({self._counts['rejected']})" if active_status == "rejected" else "Rejected")
 
     def set_active_tab(self, status):
         states = {
@@ -145,3 +132,4 @@ class UploadsPage(QWidget):
         self.pending_scroll.setVisible(status == "pending")
         self.uploaded_scroll.setVisible(status == "uploaded")
         self.rejected_scroll.setVisible(status == "rejected")
+        self._update_tab_labels(status)

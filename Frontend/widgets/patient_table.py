@@ -1,12 +1,10 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 
 class PatientRowCard(QFrame):
     clicked = Signal(int)
-    recordClicked = Signal(int)
-    uploadClicked = Signal(int)
 
     def __init__(self, row_index, row_data):
         super().__init__()
@@ -57,26 +55,6 @@ class PatientRowCard(QFrame):
 
         root.addLayout(text_col, 1)
 
-        actions_col = QVBoxLayout()
-        actions_col.setContentsMargins(6, 2, 4, 2)
-        actions_col.setSpacing(8)
-        actions_col.addStretch(1)
-
-        self.record_btn = QPushButton("Record")
-        self.record_btn.setObjectName("patientActionButton")
-        self.record_btn.setProperty("variant", "record")
-        self.record_btn.clicked.connect(lambda: self.recordClicked.emit(self._row_index))
-
-        self.upload_btn = QPushButton("Upload")
-        self.upload_btn.setObjectName("patientActionButton")
-        self.upload_btn.setProperty("variant", "upload")
-        self.upload_btn.clicked.connect(lambda: self.uploadClicked.emit(self._row_index))
-
-        actions_col.addWidget(self.record_btn)
-        actions_col.addWidget(self.upload_btn)
-        actions_col.addStretch(1)
-        root.addLayout(actions_col)
-
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.clicked.emit(self._row_index)
@@ -100,8 +78,6 @@ class PatientRowCard(QFrame):
 
 class PatientTable(QWidget):
     cellClicked = Signal(int, int)
-    recordRequested = Signal(int)
-    uploadRequested = Signal(int)
     headers = ["UHID", "GMA", "Name", "Age/Weeks", "DOB", "Gender"]
 
     def __init__(self):
@@ -137,9 +113,7 @@ class PatientTable(QWidget):
 
         for row_idx, row_data in enumerate(self._rows):
             card = PatientRowCard(row_idx, row_data)
-            card.clicked.connect(lambda idx=row_idx: self.cellClicked.emit(idx, 0))
-            card.recordClicked.connect(lambda idx=row_idx: self.recordRequested.emit(idx))
-            card.uploadClicked.connect(lambda idx=row_idx: self.uploadRequested.emit(idx))
+            card.clicked.connect(lambda idx: self.cellClicked.emit(idx, 0))
             self.body_layout.insertWidget(self.body_layout.count() - 1, card)
 
     def get_row_data(self, row_index):

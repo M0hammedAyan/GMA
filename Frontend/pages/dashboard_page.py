@@ -1,6 +1,6 @@
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 
 def make_icon(icon_name, color_hex, size=22):
@@ -159,12 +159,6 @@ class HomeStatCard(ClickableFrame):
 
         row.addLayout(text_col, 1)
 
-        self.arrow = QLabel(">")
-        self.arrow.setObjectName("homeStatArrow")
-        self.arrow.setAlignment(Qt.AlignCenter)
-        self.arrow.setFixedSize(30, 30)
-        row.addWidget(self.arrow, 0, Qt.AlignVCenter)
-
     def set_value(self, value):
         self.value_label.setText(str(value))
 
@@ -201,12 +195,6 @@ class QuickActionCard(ClickableFrame):
         text_col.addWidget(self.subtitle_label)
         row.addLayout(text_col, 1)
 
-        self.arrow = QLabel(">")
-        self.arrow.setObjectName("homeQuickArrow")
-        self.arrow.setAlignment(Qt.AlignCenter)
-        self.arrow.setFixedSize(24, 24)
-        row.addWidget(self.arrow, 0, Qt.AlignVCenter)
-
 
 class DashboardPage(QWidget):
     recordRequested = Signal()
@@ -219,18 +207,8 @@ class DashboardPage(QWidget):
         super().__init__()
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        scroll = QScrollArea()
-        scroll.setObjectName("homeScroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-
-        body = QWidget()
-        body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(8, 6, 8, 10)
-        body_layout.setSpacing(10)
+        root.setContentsMargins(8, 6, 8, 10)
+        root.setSpacing(10)
 
         hero_card = ClickableFrame()
         hero_card.setObjectName("homeHeroCard")
@@ -265,14 +243,14 @@ class DashboardPage(QWidget):
 
         hero_layout.addLayout(hero_left, 1)
         hero_layout.addWidget(hero_avatar, 0, Qt.AlignVCenter)
-        body_layout.addWidget(hero_card)
+        root.addWidget(hero_card)
 
         stats_title = QLabel("Statistics")
         stats_title.setObjectName("homeSectionTitle")
         stats_subtitle = QLabel("Operational overview for current patients and video review queue.")
         stats_subtitle.setObjectName("homeSectionSubtitle")
-        body_layout.addWidget(stats_title)
-        body_layout.addWidget(stats_subtitle)
+        root.addWidget(stats_title)
+        root.addWidget(stats_subtitle)
 
         self.cards = {
             "Total Patients": HomeStatCard("Patients", "Registered records", variant="patients"),
@@ -281,39 +259,51 @@ class DashboardPage(QWidget):
             "Rejected": HomeStatCard("Rejected Uploads", "Need follow-up", variant="rejected"),
         }
 
+        stats_grid = QGridLayout()
+        stats_grid.setContentsMargins(0, 0, 0, 0)
+        stats_grid.setHorizontalSpacing(8)
+        stats_grid.setVerticalSpacing(0)
         for key in ["Total Patients", "Pending Uploads", "Uploaded", "Rejected"]:
             card = self.cards[key]
             card.clicked.connect(lambda t=key: self.cardActionRequested.emit(t))
-            body_layout.addWidget(card)
+            stats_grid.addWidget(card, 0, ["Total Patients", "Pending Uploads", "Uploaded", "Rejected"].index(key))
+        stats_grid.setColumnStretch(0, 1)
+        stats_grid.setColumnStretch(1, 1)
+        stats_grid.setColumnStretch(2, 1)
+        stats_grid.setColumnStretch(3, 1)
+        root.addLayout(stats_grid)
 
         quick_title = QLabel("Quick Actions")
         quick_title.setObjectName("homeSectionTitle")
         quick_subtitle = QLabel("Start a new recording session or move directly into data operations.")
         quick_subtitle.setObjectName("homeSectionSubtitle")
-        body_layout.addSpacing(6)
-        body_layout.addWidget(quick_title)
-        body_layout.addWidget(quick_subtitle)
+        root.addSpacing(6)
+        root.addWidget(quick_title)
+        root.addWidget(quick_subtitle)
 
         self.record_action = QuickActionCard("Record New Video", "Capture a new video for a patient", variant="record")
         self.record_action.clicked.connect(self.recordRequested.emit)
-        body_layout.addWidget(self.record_action)
 
         self.add_patient_action = QuickActionCard("Add New Patient", "Register a new patient record", variant="patient")
         self.add_patient_action.clicked.connect(self.addPatientRequested.emit)
-        body_layout.addWidget(self.add_patient_action)
 
         self.view_uploads_action = QuickActionCard("View Uploads", "Check your video upload history", variant="upload")
         self.view_uploads_action.clicked.connect(self.viewUploadsRequested.emit)
-        body_layout.addWidget(self.view_uploads_action)
 
         self.profile_action = QuickActionCard("My Profile", "View and edit your profile", variant="profile")
         self.profile_action.clicked.connect(self.profileRequested.emit)
-        body_layout.addWidget(self.profile_action)
 
-        body_layout.addStretch(1)
-
-        scroll.setWidget(body)
-        root.addWidget(scroll)
+        quick_grid = QGridLayout()
+        quick_grid.setContentsMargins(0, 0, 0, 0)
+        quick_grid.setHorizontalSpacing(8)
+        quick_grid.setVerticalSpacing(8)
+        quick_grid.addWidget(self.record_action, 0, 0)
+        quick_grid.addWidget(self.add_patient_action, 0, 1)
+        quick_grid.addWidget(self.view_uploads_action, 1, 0)
+        quick_grid.addWidget(self.profile_action, 1, 1)
+        quick_grid.setColumnStretch(0, 1)
+        quick_grid.setColumnStretch(1, 1)
+        root.addLayout(quick_grid)
 
     def update_stats(self, values):
         for key, value in values.items():
