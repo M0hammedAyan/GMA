@@ -1,27 +1,11 @@
-# pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportGeneralTypeIssues=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
-
 from pathlib import Path
-import os
 import shutil
 import threading
 from datetime import date, datetime
 
-import cv2
-import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QDesktopServices, QGuiApplication, QImage, QPixmap
-from PySide6.QtWidgets import (
-    QFileDialog,
-    QDialog,
-    QHBoxLayout,
-    QLabel,
-    QMainWindow,
-    QMessageBox,
-    QPushButton,
-    QStackedWidget,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtGui import QDesktopServices, QGuiApplication
+from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QStackedWidget, QVBoxLayout, QWidget
 
 from Frontend.pages.dashboard_page import DashboardPage
 from Frontend.pages.add_patient_page import AddPatientPage
@@ -61,7 +45,6 @@ class MainWindow(QMainWindow):
 
         self.controller = Recorder()
         self.start_thread = None
-        self._start_lock = threading.Lock()
         self.is_recording = False
         self.seconds = 0
         self.uhid_seed = 1000
@@ -73,8 +56,6 @@ class MainWindow(QMainWindow):
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_timer)
-        self.preview_timer = QTimer()
-        self.preview_timer.timeout.connect(self._update_live_preview)
 
         self.recording_started.connect(self._handle_started)
         self.recording_start_failed.connect(self._handle_start_error)
@@ -124,7 +105,6 @@ class MainWindow(QMainWindow):
         self.record_page.action_btn.clicked.connect(self._on_action)
         self.record_page.upload_btn.clicked.connect(self.upload_video_from_device)
         self.record_page.back_button.clicked.connect(lambda: self._goto(1))
-        self.record_page.preview_mode_combo.currentTextChanged.connect(lambda _t: self._update_live_preview())
         self.header.user_button.clicked.connect(self.show_profile)
         self.profile_page.back_button.clicked.connect(lambda: self._goto(0))
         self.add_patient_page.cancel_btn.clicked.connect(lambda: self._goto(1))
@@ -303,7 +283,6 @@ class MainWindow(QMainWindow):
     def _set_recording_visuals(self, recording):
         rp = self.record_page
         rp.set_recording_mode(recording)
-        self._set_preview_placeholders()
         if recording:
             rp.action_btn.setObjectName("recordingButton")
             rp.action_btn.setText("Stop Recording")
@@ -329,7 +308,6 @@ class MainWindow(QMainWindow):
             if result == RecordingChecklistDialog.SKIPPED:
                 self._checklist_ready_for_start = True
                 self.record_page.set_recording_mode(True)
-                self._start_live_preview()
                 self._log_status("Checklist skipped. Preview opened.")
                 return
             if result != RecordingChecklistDialog.Accepted:
@@ -344,7 +322,6 @@ class MainWindow(QMainWindow):
         self._update_required_state()
         self._checklist_ready_for_start = False
         self.record_page.set_recording_mode(False)
-        self._stop_live_preview()
         self.show_record()
         self._log_status(f"Loaded patient {patient.get('Name', '--')}")
 
@@ -355,31 +332,28 @@ class MainWindow(QMainWindow):
         self._update_required_state()
         self._checklist_ready_for_start = False
         self.record_page.set_recording_mode(False)
-        self._stop_live_preview()
         self.upload_video_from_device()
 
     def start_recording(self):
-        with self._start_lock:
-            if self.start_thread and self.start_thread.is_alive():
-                return
-            if not self._required_valid():
-                QMessageBox.warning(self, "Missing Required Fields", "Fill Name, Age/Weeks and UHID before recording")
-                return
+        if self.start_thread and self.start_thread.is_alive():
+            return
+        if not self._required_valid():
+            QMessageBox.warning(self, "Missing Required Fields", "Fill Name, Age/Weeks and UHID before recording")
+            return
 
-            # Show preview mode right away after checklist so users see the live screen instantly.
-            self.record_page.set_recording_mode(True)
-            self._start_live_preview()
-            self.record_page.action_btn.setEnabled(False)
+        # Show preview mode right away after checklist so users see the live screen instantly.
+        self.record_page.set_recording_mode(True)
+        self.record_page.action_btn.setEnabled(False)
 
-            def _worker():
-                try:
-                    self.controller.start()
-                    self.recording_started.emit()
-                except Exception as err:
-                    self.recording_start_failed.emit(str(err))
+        def _worker():
+            try:
+                self.controller.start()
+                self.recording_started.emit()
+            except Exception as err:
+                self.recording_start_failed.emit(str(err))
 
-            self.start_thread = threading.Thread(target=_worker, daemon=False)
-            self.start_thread.start()
+        self.start_thread = threading.Thread(target=_worker, daemon=True)
+        self.start_thread.start()
 
     def _handle_started(self):
         self.is_recording = True
@@ -390,12 +364,10 @@ class MainWindow(QMainWindow):
         self.record_page.action_btn.setEnabled(True)
         self._log_status("Recording started")
         self.show_record()
-        self._start_live_preview()
 
     def _handle_start_error(self, message):
         self.is_recording = False
         self.timer.stop()
-        self._stop_live_preview()
         error_text = str(message)
 
         if "realsense" in error_text.lower() and "not detected" in error_text.lower():
@@ -423,7 +395,6 @@ class MainWindow(QMainWindow):
             return
 
         self.timer.stop()
-        self._stop_live_preview()
         self.is_recording = False
         self._set_patient_locked(False)
         self._set_recording_visuals(False)
@@ -453,17 +424,6 @@ class MainWindow(QMainWindow):
         self._refresh_patient_upload_history()
         self._refresh_stats()
 
-        preview_choice = QMessageBox(self)
-        preview_choice.setWindowTitle("Recording Completed")
-        preview_choice.setText("Recording completed successfully.")
-        preview_choice.setInformativeText("Do you want to preview both videos side by side?")
-        preview_btn = preview_choice.addButton("Preview", QMessageBox.AcceptRole)
-        preview_choice.addButton("Close", QMessageBox.RejectRole)
-        preview_choice.exec()
-
-        if preview_choice.clickedButton() == preview_btn:
-            self.preview_last_session()
-
     def _latest_session_path(self):
         root = Path(self.controller.output_root)
         if not root.exists():
@@ -482,33 +442,7 @@ class MainWindow(QMainWindow):
         if not self.last_saved_session:
             QMessageBox.information(self, "Preview", "No recorded session found")
             return
-
-        realsense_video, webcam_video = self._session_video_paths(self.last_saved_session)
-        if not realsense_video or not webcam_video:
-            QMessageBox.warning(self, "Preview", "Could not find both recorded videos for this session")
-            return
-
-        try:
-            dialog = SessionPreviewDialog(realsense_video, webcam_video, parent=self)
-        except Exception as err:
-            QMessageBox.warning(self, "Preview", f"Unable to open preview: {err}")
-            return
-
-        dialog.exec()
-
-    def _session_video_paths(self, session_path):
-        base = Path(session_path)
-        if not base.exists():
-            return "", ""
-
-        def _pick(stem):
-            for ext in (".avi", ".mp4", ".mov", ".mkv"):
-                candidate = base / f"{stem}{ext}"
-                if candidate.exists():
-                    return str(candidate)
-            return ""
-
-        return _pick("realsense"), _pick("webcam")
+        QDesktopServices.openUrl(Path(self.last_saved_session).resolve().as_uri())
 
     def upload_last_session(self):
         if not self.last_saved_session:
@@ -641,266 +575,3 @@ class MainWindow(QMainWindow):
 
     def _log_status(self, message, replace_last=False):
         self.record_page.status_label.setText(message)
-
-    def _start_live_preview(self):
-        if os.getenv("GMA_DISABLE_LIVE_PREVIEW", "0") == "1":
-            return
-        if not self.preview_timer.isActive():
-            self.preview_timer.start(200)
-
-    def _stop_live_preview(self):
-        if self.preview_timer.isActive():
-            self.preview_timer.stop()
-        self._set_preview_placeholders()
-
-    def _set_preview_placeholders(self):
-        self.record_page.preview_left_surface.setPixmap(QPixmap())
-        self.record_page.preview_right_surface.setPixmap(QPixmap())
-        self.record_page.preview_left_surface.setText("Waiting for camera stream")
-        self.record_page.preview_right_surface.setText("Waiting for camera stream")
-
-    def _depth_to_colormap(self, depth_raw):
-        # Depth is pre-colored in recorder thread to keep UI thread light.
-        return depth_raw
-
-    def _to_pixmap(self, frame, target_size):
-        if frame is None or frame.size == 0:
-            return QPixmap()
-        rgb_frame = None
-        qimg = None
-        pixmap = None
-        try:
-            if len(frame.shape) < 2 or frame.shape[0] <= 0 or frame.shape[1] <= 0:
-                return QPixmap()
-
-            target_w = max(1, min(460, target_size.width()))
-            target_h = max(1, target_size.height())
-
-            if len(frame.shape) == 2:
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
-            elif len(frame.shape) == 3 and frame.shape[2] == 4:
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
-            elif len(frame.shape) == 3 and frame.shape[2] == 3:
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            elif len(frame.shape) == 3 and frame.shape[2] != 3:
-                return QPixmap()
-
-            if rgb_frame is None or rgb_frame.size == 0:
-                return QPixmap()
-
-            rgb_frame = np.ascontiguousarray(rgb_frame)
-            h, w, ch = rgb_frame.shape
-            bytes_per_line = ch * w
-            qimg = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
-            if qimg.isNull():
-                return QPixmap()
-
-            pixmap = QPixmap.fromImage(qimg)
-            if pixmap.isNull():
-                return QPixmap()
-            return pixmap.scaled(target_w, target_h, Qt.KeepAspectRatio, Qt.FastTransformation)
-        except Exception:
-            return QPixmap()
-        finally:
-            if frame is not None:
-                del frame
-            if rgb_frame is not None:
-                del rgb_frame
-            if qimg is not None:
-                del qimg
-            if pixmap is not None:
-                del pixmap
-
-    def _set_preview_surfaces(self, left_frame, right_frame, left_title, right_title):
-        self.record_page.preview_left_title.setText(left_title)
-        self.record_page.preview_right_title.setText(right_title)
-
-        left_pixmap = self._to_pixmap(left_frame, self.record_page.preview_left_surface.size())
-        right_pixmap = self._to_pixmap(right_frame, self.record_page.preview_right_surface.size())
-
-        if left_pixmap.isNull():
-            self.record_page.preview_left_surface.setPixmap(QPixmap())
-            self.record_page.preview_left_surface.setText("No frame")
-        else:
-            self.record_page.preview_left_surface.setText("")
-            self.record_page.preview_left_surface.setPixmap(left_pixmap)
-
-        if right_pixmap.isNull():
-            self.record_page.preview_right_surface.setPixmap(QPixmap())
-            self.record_page.preview_right_surface.setText("No frame")
-        else:
-            self.record_page.preview_right_surface.setText("")
-            self.record_page.preview_right_surface.setPixmap(right_pixmap)
-
-        del left_pixmap
-        del right_pixmap
-        if left_frame is not None:
-            del left_frame
-        if right_frame is not None:
-            del right_frame
-
-    def _update_live_preview(self):
-        if not self.record_page.preview_card.isVisible():
-            return
-        frames = None
-        rs_color = None
-        rs_depth = None
-        webcam = None
-        rs_depth_colormap = None
-        try:
-            frames = self.controller.get_preview_frames()
-            rs_color = frames.get("realsense_color")
-            rs_depth = frames.get("realsense_depth")
-            webcam = frames.get("webcam")
-            rs_depth_colormap = self._depth_to_colormap(rs_depth)
-
-            mode = self.record_page.preview_mode_combo.currentText()
-
-            if mode == "RealSense Depth (Color) + Color":
-                self._set_preview_surfaces(rs_depth_colormap, rs_color, "RealSense Depth (JET)", "RealSense Color")
-                return
-            if mode == "RealSense Depth (Color) + Webcam":
-                self._set_preview_surfaces(rs_depth_colormap, webcam, "RealSense Depth (JET)", "Webcam")
-                return
-
-            self._set_preview_surfaces(rs_color, webcam, "RealSense Color", "Webcam")
-        finally:
-            if frames is not None:
-                del frames
-            if rs_color is not None:
-                del rs_color
-            if rs_depth is not None:
-                del rs_depth
-            if webcam is not None:
-                del webcam
-            if rs_depth_colormap is not None:
-                del rs_depth_colormap
-
-    def closeEvent(self, event):
-        self.timer.stop()
-        self._stop_live_preview()
-        if self.start_thread is not None and self.start_thread.is_alive():
-            self.start_thread.join(timeout=2.0)
-        try:
-            self.controller.stop()
-        except Exception:
-            pass
-        super().closeEvent(event)
-
-
-class SessionPreviewDialog(QDialog):
-    def __init__(self, realsense_path, webcam_path, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Session Preview")
-        self.setMinimumSize(980, 520)
-
-        self._rs_cap = cv2.VideoCapture(realsense_path)
-        self._wc_cap = cv2.VideoCapture(webcam_path)
-        if not self._rs_cap.isOpened() or not self._wc_cap.isOpened():
-            self._release_caps()
-            raise RuntimeError("Unable to open preview videos")
-
-        rs_fps = self._rs_cap.get(cv2.CAP_PROP_FPS) or 10.0
-        wc_fps = self._wc_cap.get(cv2.CAP_PROP_FPS) or 10.0
-        self._fps = max(1.0, min(rs_fps, wc_fps))
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(10)
-
-        videos = QHBoxLayout()
-        videos.setSpacing(10)
-
-        self._left_label = QLabel("RealSense")
-        self._left_label.setAlignment(Qt.AlignCenter)
-        self._left_label.setMinimumSize(460, 300)
-        self._left_label.setObjectName("previewSurface")
-
-        self._right_label = QLabel("Webcam")
-        self._right_label.setAlignment(Qt.AlignCenter)
-        self._right_label.setMinimumSize(460, 300)
-        self._right_label.setObjectName("previewSurface")
-
-        videos.addWidget(self._left_label, 1)
-        videos.addWidget(self._right_label, 1)
-        root.addLayout(videos, 1)
-
-        controls = QHBoxLayout()
-        controls.addStretch(1)
-        self._play_pause_btn = QPushButton("Pause")
-        self._play_pause_btn.clicked.connect(self._toggle_play_pause)
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        controls.addWidget(self._play_pause_btn)
-        controls.addWidget(close_btn)
-        root.addLayout(controls)
-
-        self._playing = True
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._next_frame)
-        self._timer.start(int(1000.0 / self._fps))
-
-        self._next_frame()
-
-    def _toggle_play_pause(self):
-        self._playing = not self._playing
-        self._play_pause_btn.setText("Pause" if self._playing else "Play")
-
-    def _next_frame(self):
-        if not self._playing:
-            return
-
-        ok_left, left = self._rs_cap.read()
-        ok_right, right = self._wc_cap.read()
-
-        if not ok_left or not ok_right:
-            self._timer.stop()
-            self._play_pause_btn.setEnabled(False)
-            return
-
-        self._left_label.setPixmap(self._to_pixmap(left, self._left_label.size()))
-        self._right_label.setPixmap(self._to_pixmap(right, self._right_label.size()))
-
-    def _to_pixmap(self, frame, target_size):
-        if frame is None:
-            return QPixmap()
-        try:
-            if len(frame.shape) < 2 or frame.shape[0] <= 0 or frame.shape[1] <= 0:
-                return QPixmap()
-
-            target_w = max(1, min(460, target_size.width()))
-            target_h = max(1, target_size.height())
-
-            if len(frame.shape) == 2:
-                frame = np.dstack((frame, frame, frame))
-            elif len(frame.shape) == 3 and frame.shape[2] == 4:
-                frame = frame[:, :, :3]
-            elif len(frame.shape) == 3 and frame.shape[2] != 3:
-                return QPixmap()
-
-            rgb = np.ascontiguousarray(frame[:, :, ::-1])
-            h, w, ch = rgb.shape
-            bytes_per_line = ch * w
-            image = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
-            if image.isNull():
-                return QPixmap()
-
-            pixmap = QPixmap.fromImage(image)
-            if pixmap.isNull():
-                return QPixmap()
-            return pixmap.scaled(target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        except Exception:
-            return QPixmap()
-
-    def _release_caps(self):
-        if self._rs_cap is not None:
-            self._rs_cap.release()
-            self._rs_cap = None
-        if self._wc_cap is not None:
-            self._wc_cap.release()
-            self._wc_cap = None
-
-    def closeEvent(self, event):
-        self._timer.stop()
-        self._release_caps()
-        super().closeEvent(event)

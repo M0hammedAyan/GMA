@@ -1,8 +1,5 @@
-# pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportGeneralTypeIssues=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
-
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -86,45 +83,14 @@ class RecordPage(QWidget):
         self.timestamp_chip.setObjectName("previewChip")
         chip_row.addWidget(self.gps_chip)
         chip_row.addWidget(self.timestamp_chip)
-        self.preview_mode_combo = QComboBox()
-        self.preview_mode_combo.addItems(
-            [
-                "Both Cameras",
-                "RealSense Depth (Color) + Color",
-                "RealSense Depth (Color) + Webcam",
-            ]
-        )
-        self.preview_mode_combo.setObjectName("filterChip")
-        chip_row.addWidget(self.preview_mode_combo)
         chip_row.addStretch(1)
         preview_layout.addLayout(chip_row)
 
-        labels_row = QHBoxLayout()
-        labels_row.setSpacing(8)
-        self.preview_left_title = QLabel("RealSense")
-        self.preview_left_title.setObjectName("sectionTitle")
-        self.preview_right_title = QLabel("Webcam")
-        self.preview_right_title.setObjectName("sectionTitle")
-        labels_row.addWidget(self.preview_left_title)
-        labels_row.addStretch(1)
-        labels_row.addWidget(self.preview_right_title)
-        preview_layout.addLayout(labels_row)
-
-        previews_row = QHBoxLayout()
-        previews_row.setSpacing(8)
-        self.preview_left_surface = QLabel("Live camera feed unavailable")
-        self.preview_left_surface.setObjectName("previewSurface")
-        self.preview_left_surface.setAlignment(Qt.AlignCenter)
-        self.preview_left_surface.setMinimumHeight(320)
-
-        self.preview_right_surface = QLabel("Live camera feed unavailable")
-        self.preview_right_surface.setObjectName("previewSurface")
-        self.preview_right_surface.setAlignment(Qt.AlignCenter)
-        self.preview_right_surface.setMinimumHeight(320)
-
-        previews_row.addWidget(self.preview_left_surface, 1)
-        previews_row.addWidget(self.preview_right_surface, 1)
-        preview_layout.addLayout(previews_row, 1)
+        self.preview_surface = QLabel("Live Camera Preview")
+        self.preview_surface.setObjectName("previewSurface")
+        self.preview_surface.setAlignment(Qt.AlignCenter)
+        self.preview_surface.setMinimumHeight(320)
+        preview_layout.addWidget(self.preview_surface, 1)
 
         status_row = QHBoxLayout()
         status_row.setSpacing(8)
@@ -141,8 +107,8 @@ class RecordPage(QWidget):
 
         record_row = QHBoxLayout()
         record_row.setSpacing(10)
-        self.action_btn = QPushButton("Start Recording")
-        self.action_btn.setObjectName("primaryButton")
+        self.action_btn = QPushButton("Start / Stop Recording")
+        self.action_btn.setObjectName("recordingButton")
         self.upload_btn = QPushButton("Upload")
         self.upload_btn.setObjectName("secondaryButton")
         self.timer_label = QLabel("00:00:00")

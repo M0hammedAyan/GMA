@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -55,8 +56,10 @@ class AddPatientPage(QWidget):
         self.dob_input.setMinimumDate(QDate(1900, 1, 1))
         self.dob_input.setSpecialValueText("Select DOB")
         self.dob_input.setDate(QDate(1900, 1, 1))
-        self.age_input = QLineEdit()
-        self.age_input.setPlaceholderText("Enter gestational age (e.g. 32 or 32+4)")
+        self.age_input = QSpinBox()
+        self.age_input.setRange(0, 50)
+        self.age_input.setSpecialValueText("Enter weeks")
+        self.age_input.setValue(0)
         self.uhid_input = QLineEdit()
         self.uhid_input.setReadOnly(True)
         self.uhid_input.setPlaceholderText("Auto-generated on save")
@@ -112,7 +115,7 @@ class AddPatientPage(QWidget):
     def load_new_patient(self):
         self.name_input.clear()
         self.dob_input.setDate(QDate(1900, 1, 1))
-        self.age_input.clear()
+        self.age_input.setValue(0)
         self.gender_input.setCurrentIndex(0)
         self.uhid_input.setText(self.generate_uhid())
         self.gma_uhid_input.setText(self.generate_gma_uhid())
@@ -128,7 +131,8 @@ class AddPatientPage(QWidget):
         if dob_value == QDate(1900, 1, 1):
             dob_text = date.today().strftime("%Y-%m-%d")
 
-        age_text = self.age_input.text().strip()
+        age_value = self.age_input.value()
+        age_text = str(age_value) if age_value > 0 else ""
 
         gender_text = self.gender_input.currentText()
         if gender_text == "Select Gender":

@@ -41,6 +41,15 @@ Run without frontend (headless recorder):
 python run_without_frontend.py
 ```
 
+Run the dedicated native C++ recorder path (for deterministic dual-camera capture):
+
+```bash
+cd native
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./build/gma_dualcam_recorder
+```
+
 Optional environment variable:
 
 ```bash
